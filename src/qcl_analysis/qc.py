@@ -1,4 +1,5 @@
 import pandas as pd
+from qcl_analysis.io import load_qcl_csv
 
 REQUIRED_COLUMNS = {
     "frame",
@@ -102,3 +103,36 @@ def find_incomplete_frames(
             incomplete_frames[int(frame)] = missing
 
     return incomplete_frames
+
+
+def validate_image_files(
+    dataset: pd.DataFrame,
+    expected_shape: tuple[int, int] | None = None,
+) -> tuple[int, int]:
+    """Validate that all QCL image files are readable and have consistent shapes."""
+
+    reference_shape = expected_shape
+
+    for row in dataset.itertuples(index=False):
+        try:
+            image = load_qcl_csv(row.path)
+        except (FileNotFoundError, ValueError) as exc:
+            raise DatasetValidationError(
+                f"Failed to load frame {row.frame}, "
+                f"wavenumber {row.wavenumber}: {row.path}"
+            ) from exc
+
+        if reference_shape is None:
+            reference_shape = image.shape
+
+        if image.shape != reference_shape:
+            raise DatasetValidationError(
+                f"Image shape mismatch at frame {row.frame}, "
+                f"wavenumber {row.wavenumber}: "
+                f"expected {reference_shape}, got {image.shape}"
+            )
+
+    if reference_shape is None:
+        raise DatasetValidationError("Dataset contains no image files.")
+
+    return reference_shape
