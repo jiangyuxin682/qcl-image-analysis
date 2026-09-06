@@ -12,6 +12,9 @@ __pycache__/
 # Package metadata generated during installation/build.
 *.egg-info/
 
+# Project-local Python environment used by the UI launchers.
+.venv/
+
 
 # ==============================
 # Jupyter-generated files

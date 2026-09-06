@@ -31,6 +31,10 @@ notebook = [
     "ipywidgets",
 ]
 
+ui = [
+    "pillow",
+]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
