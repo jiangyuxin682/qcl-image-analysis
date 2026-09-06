@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import html
 import io
 import json
 import math
@@ -22,7 +24,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 from qcl_analysis.absorbance import calculate_absorbance, calculate_r0
 from qcl_analysis.cropping import crop_image, crop_ms_regions
@@ -38,6 +40,8 @@ from qcl_analysis.roi import ROI
 
 STATIC_DIR = Path(__file__).with_name("static")
 DEFAULT_STACKS = os.environ.get("QCL_STACKS_DIR", "")
+COLORBAR_PANEL_WIDTH = 80
+IMAGE_RENDER_SCALE = 3
 
 
 def _json_ready(value):
@@ -349,6 +353,15 @@ class AnalysisState:
         if selected.empty:
             raise ValueError(f"No frames are available for {wavenumber} cm^-1.")
 
+        created_timestamps = selected["created_timestamp"].astype(float).to_numpy()
+        t0_timestamp = float(created_timestamps[0])
+        intervals = np.diff(created_timestamps)
+        dt_seconds = float(np.median(intervals)) if intervals.size else 0.0
+        timestamp_sources = selected["timestamp_source"].astype(str).unique().tolist()
+        timestamp_source = (
+            timestamp_sources[0] if len(timestamp_sources) == 1 else "mixed"
+        )
+
         frames = []
         finite_parts = []
         shape = None
@@ -367,6 +380,13 @@ class AnalysisState:
                     "pattern": str(row.pattern),
                     "frame": int(row.frame),
                     "valid": bool(row.frame_valid),
+                    "created_at": datetime.fromtimestamp(
+                        float(row.created_timestamp)
+                    )
+                    .astimezone()
+                    .isoformat(timespec="seconds"),
+                    "elapsed_seconds": float(row.created_timestamp)
+                    - t0_timestamp,
                 }
             )
 
@@ -383,6 +403,10 @@ class AnalysisState:
             "frame_count": len(frames),
             "start_frame": int(frames[0]["frame"]),
             "end_frame": int(frames[-1]["frame"]),
+            "t0": frames[0]["created_at"],
+            "tend": frames[-1]["created_at"],
+            "dt_seconds": dt_seconds,
+            "timestamp_source": timestamp_source,
             "image_shape": list(shape),
             "vmin": float(vmin),
             "vmax": float(vmax),
@@ -408,7 +432,14 @@ class AnalysisState:
 
     def trend(self) -> list[dict]:
         dataset = self.require_dataset()
-        columns = ["frame", "pattern", "wavenumber", "i_goldref", "reference_valid"]
+        columns = [
+            "frame",
+            "pattern",
+            "wavenumber",
+            "i_goldref",
+            "reference_valid",
+            "frame_valid",
+        ]
         return dataset[columns].to_dict(orient="records")
 
     def export_zip(self) -> tuple[bytes, str]:
@@ -465,12 +496,14 @@ def render_png(
     *,
     low: float = 1,
     high: float = 99,
-    cmap: str = "viridis",
+    cmap: str = "inferno",
     brightest: int = 0,
     limits: tuple[float, float] | None = None,
+    colorbar_label: str = "Value",
 ) -> bytes:
     finite = image[np.isfinite(image)]
     if finite.size == 0:
+        vmin, vmax = 0.0, 1.0
         normalized = np.zeros_like(image, dtype=float)
     else:
         vmin, vmax = limits or np.percentile(finite, [low, high])
@@ -483,10 +516,220 @@ def render_png(
     if brightest:
         ys, xs, _ = get_brightest_pixel_indices(image, n_pixels=brightest)
         for y, x in zip(ys, xs):
-            rgb[max(0, y - 1) : y + 2, max(0, x - 1) : x + 2] = (239, 68, 68)
+            rgb[max(0, y - 1) : y + 2, max(0, x - 1) : x + 2] = (0, 255, 136)
+
+    height, width = image.shape
+    scale = IMAGE_RENDER_SCALE
+    data_image = Image.fromarray(rgb).resize(
+        (width * scale, height * scale), Image.Resampling.NEAREST
+    )
+    rendered = Image.new(
+        "RGB",
+        ((width + COLORBAR_PANEL_WIDTH) * scale, height * scale),
+        (13, 23, 21),
+    )
+    rendered.paste(data_image, (0, 0))
+
+    # Keep data at x:[0, width * scale) so ROI coordinates remain reversible.
+    draw = ImageDraw.Draw(rendered)
+    render_height = height * scale
+    strip_x0 = (width + 8) * scale
+    strip_x1 = strip_x0 + 12 * scale
+    has_labels = render_height >= 60
+    if has_labels:
+        label_size = max(8, min(30, round(render_height * 0.065)))
+        tick_size = max(7, min(27, round(render_height * 0.055)))
+        top = label_size + tick_size // 2 + 8
+        bottom = render_height - tick_size // 2 - 4
+    else:
+        top = 2 * scale
+        bottom = max(top + scale, render_height - 2 * scale)
+    gradient = np.linspace(1.0, 0.0, bottom - top + 1)[:, None]
+    gradient_rgb = plt.get_cmap(cmap)(gradient, bytes=True)[:, :, :3]
+    gradient_rgb = np.repeat(gradient_rgb, strip_x1 - strip_x0, axis=1)
+    rendered.paste(Image.fromarray(gradient_rgb), (strip_x0, top))
+    draw.rectangle(
+        (strip_x0, top, strip_x1 - 1, bottom),
+        outline=(224, 235, 232),
+        width=scale,
+    )
+
+    if has_labels:
+        try:
+            label_font = ImageFont.truetype("DejaVuSans.ttf", label_size)
+            tick_font = ImageFont.truetype("DejaVuSans.ttf", tick_size)
+        except OSError:
+            label_font = ImageFont.load_default(size=label_size)
+            tick_font = ImageFont.load_default(size=tick_size)
+        text_x = strip_x1 + 5 * scale
+        text_color = (224, 235, 232)
+        draw.text(
+            (strip_x0, 3),
+            colorbar_label,
+            fill=text_color,
+            font=label_font,
+        )
+        ticks = (
+            (top, vmax),
+            ((top + bottom) // 2, (vmin + vmax) / 2),
+            (bottom, vmin),
+        )
+        for tick_y, value in ticks:
+            draw.line(
+                (strip_x1, tick_y, strip_x1 + 3 * scale, tick_y),
+                fill=text_color,
+                width=scale,
+            )
+            draw.text(
+                (text_x, tick_y),
+                f"{value:.3g}",
+                fill=text_color,
+                font=tick_font,
+                anchor="lm",
+            )
     output = io.BytesIO()
-    Image.fromarray(rgb).save(output, format="PNG")
+    rendered.save(output, format="PNG")
     return output.getvalue()
+
+
+def render_svg(
+    image: np.ndarray,
+    *,
+    low: float = 1,
+    high: float = 99,
+    cmap: str = "inferno",
+    brightest: int = 0,
+    limits: tuple[float, float] | None = None,
+    colorbar_label: str = "Value",
+) -> bytes:
+    """Render a heatmap with a vector colorbar and resolution-independent text."""
+    finite = image[np.isfinite(image)]
+    if finite.size == 0:
+        vmin, vmax = 0.0, 1.0
+        normalized = np.zeros_like(image, dtype=float)
+    else:
+        vmin, vmax = limits or np.percentile(finite, [low, high])
+        if vmax <= vmin:
+            vmax = vmin + np.finfo(float).eps
+        normalized = np.clip((image - vmin) / (vmax - vmin), 0, 1)
+        normalized[~np.isfinite(normalized)] = 0
+
+    colormap = plt.get_cmap(cmap)
+    rgb = colormap(normalized, bytes=True)[:, :, :3].copy()
+    if brightest:
+        ys, xs, _ = get_brightest_pixel_indices(image, n_pixels=brightest)
+        for y, x in zip(ys, xs):
+            rgb[max(0, y - 1) : y + 2, max(0, x - 1) : x + 2] = (0, 255, 136)
+
+    raster = io.BytesIO()
+    Image.fromarray(rgb).save(raster, format="PNG")
+    encoded = base64.b64encode(raster.getvalue()).decode("ascii")
+
+    height, width = image.shape
+    bar_aspect = 18.0
+    margin = max(1.2, min(3.0, height * 0.018))
+    label_size = max(2.2, min(7.0, height * 0.055))
+    tick_size = max(2.0, min(6.0, height * 0.05))
+    bar_top = max(margin + label_size * 1.35, height * 0.09)
+    bar_bottom = height - max(margin, tick_size * 0.62)
+    bar_height = max(1.0, bar_bottom - bar_top)
+    bar_width = bar_height / bar_aspect
+    tick_length = max(0.8, bar_width * 0.42)
+    gap = max(1.0, height * 0.012)
+    values = (f"{vmax:.3g}", f"{(vmin + vmax) / 2:.3g}", f"{vmin:.3g}")
+    label_width = len(colorbar_label) * label_size * 0.61
+    value_width = max(len(value) for value in values) * tick_size * 0.61
+    panel_width = max(
+        label_width + 2 * margin,
+        margin + bar_width + tick_length + gap + value_width + margin,
+    )
+    total_width = width + panel_width
+    bar_x = width + margin
+    text_x = bar_x + bar_width + tick_length + gap
+    stroke_width = max(0.25, height * 0.0035)
+
+    stops = []
+    for offset in np.linspace(0, 1, 13):
+        red, green, blue, _ = colormap(float(offset))
+        color = f"#{round(red * 255):02x}{round(green * 255):02x}{round(blue * 255):02x}"
+        stops.append(
+            f'<stop offset="{offset:.4f}" stop-color="{color}"/>'
+        )
+    tick_positions = (bar_top, (bar_top + bar_bottom) / 2, bar_bottom)
+    tick_markup = "".join(
+        f'<line x1="{bar_x + bar_width:.4f}" y1="{position:.4f}" '
+        f'x2="{bar_x + bar_width + tick_length:.4f}" y2="{position:.4f}"/>'
+        f'<text x="{text_x:.4f}" y="{position:.4f}" '
+        f'font-size="{tick_size:.4f}" dominant-baseline="middle">'
+        f'{html.escape(value)}</text>'
+        for position, value in zip(tick_positions, values)
+    )
+    output_width = math.ceil(total_width * IMAGE_RENDER_SCALE)
+    output_height = height * IMAGE_RENDER_SCALE
+    svg = f'''<svg xmlns="http://www.w3.org/2000/svg"
+      width="{output_width}" height="{output_height}"
+      viewBox="0 0 {total_width:.4f} {height}"
+      preserveAspectRatio="xMinYMid meet">
+      <defs>
+        <linearGradient id="colorbar-gradient" x1="0" y1="1" x2="0" y2="0">
+          {''.join(stops)}
+        </linearGradient>
+      </defs>
+      <rect width="100%" height="100%" fill="#0d1715"/>
+      <image href="data:image/png;base64,{encoded}" x="0" y="0"
+        width="{width}" height="{height}" preserveAspectRatio="none"
+        style="image-rendering:pixelated"/>
+      <g fill="#e0ebe8" stroke="#e0ebe8"
+        font-family="Inter,Segoe UI,DejaVu Sans,Arial,sans-serif">
+        <text x="{bar_x:.4f}" y="{margin + label_size:.4f}"
+          font-size="{label_size:.4f}" stroke="none">{html.escape(colorbar_label)}</text>
+        <rect id="colorbar-strip" x="{bar_x:.4f}" y="{bar_top:.4f}"
+          width="{bar_width:.4f}" height="{bar_height:.4f}"
+          fill="url(#colorbar-gradient)" stroke-width="{stroke_width:.4f}"
+          data-colorbar-aspect="{bar_aspect:.1f}"/>
+        <g fill="#e0ebe8" stroke="#e0ebe8" stroke-width="{stroke_width:.4f}">
+          {tick_markup}
+        </g>
+      </g>
+    </svg>'''
+    return svg.encode("utf-8")
+
+
+def render_data_png(
+    image: np.ndarray,
+    *,
+    low: float = 1,
+    high: float = 99,
+    cmap: str = "inferno",
+    brightest: int = 0,
+    limits: tuple[float, float] | None = None,
+) -> tuple[bytes, float, float]:
+    """Render only image data; the browser draws the vector-like HTML colorbar."""
+    finite = image[np.isfinite(image)]
+    if finite.size == 0:
+        vmin, vmax = 0.0, 1.0
+        normalized = np.zeros_like(image, dtype=float)
+    else:
+        vmin, vmax = limits or np.percentile(finite, [low, high])
+        if vmax <= vmin:
+            vmax = vmin + np.finfo(float).eps
+        normalized = np.clip((image - vmin) / (vmax - vmin), 0, 1)
+        normalized[~np.isfinite(normalized)] = 0
+
+    rgb = plt.get_cmap(cmap)(normalized, bytes=True)[:, :, :3].copy()
+    if brightest:
+        ys, xs, _ = get_brightest_pixel_indices(image, n_pixels=brightest)
+        for y, x in zip(ys, xs):
+            rgb[max(0, y - 1) : y + 2, max(0, x - 1) : x + 2] = (0, 255, 136)
+
+    height, width = image.shape
+    rendered = Image.fromarray(rgb).resize(
+        (width * IMAGE_RENDER_SCALE, height * IMAGE_RENDER_SCALE),
+        Image.Resampling.NEAREST,
+    )
+    output = io.BytesIO()
+    rendered.save(output, format="PNG")
+    return output.getvalue(), float(vmin), float(vmax)
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -546,7 +789,7 @@ class Handler(SimpleHTTPRequestHandler):
                     q["pattern"][0],
                     int(q["wavenumber"][0]),
                 )
-                data = render_png(
+                data, _, _ = render_data_png(
                     array,
                     limits=(float(q["vmin"][0]), float(q["vmax"][0])),
                 )
@@ -561,8 +804,9 @@ class Handler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/image":
             try:
                 q = parse_qs(parsed.query)
+                kind = q.get("kind", ["raw"])[0]
                 array = STATE.image(
-                    q.get("kind", ["raw"])[0],
+                    kind,
                     q["pattern"][0],
                     int(q["wavenumber"][0]),
                 )
@@ -575,7 +819,6 @@ class Handler(SimpleHTTPRequestHandler):
                 ]
                 limits = None
                 if scale_patterns:
-                    kind = q.get("kind", ["raw"])[0]
                     wavenumber = int(q["wavenumber"][0])
                     finite_parts = [
                         part[np.isfinite(part)]
@@ -592,11 +835,18 @@ class Handler(SimpleHTTPRequestHandler):
                                 np.concatenate(finite_parts), [low, high]
                             )
                         )
-                data = render_png(
+                colorbar_label = (
+                    "Intensity"
+                    if kind == "raw"
+                    else "Absorbance"
+                    if kind.endswith("absorbance")
+                    else "Reflectance"
+                )
+                data, vmin, vmax = render_data_png(
                     array,
                     low=low,
                     high=high,
-                    cmap=q.get("cmap", ["viridis"])[0],
+                    cmap=q.get("cmap", ["inferno"])[0],
                     brightest=int(q.get("brightest", [0])[0]),
                     limits=limits,
                 )
@@ -605,6 +855,9 @@ class Handler(SimpleHTTPRequestHandler):
                 self.send_header("Cache-Control", "no-store")
                 self.send_header("X-Image-Width", str(array.shape[1]))
                 self.send_header("X-Image-Height", str(array.shape[0]))
+                self.send_header("X-Colorbar-Min", str(vmin))
+                self.send_header("X-Colorbar-Max", str(vmax))
+                self.send_header("X-Colorbar-Label", colorbar_label)
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
                 return self.wfile.write(data)

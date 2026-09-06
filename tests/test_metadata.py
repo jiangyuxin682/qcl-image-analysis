@@ -24,6 +24,8 @@ def test_index_qcl_dataset(tmp_path):
 
     assert dataset["frame"].tolist() == [0, 0, 1, 1]
     assert dataset["wavenumber"].tolist() == [1600, 1655, 1600, 1655]
+    assert (dataset["created_timestamp"] > 0).all()
+    assert dataset["timestamp_source"].notna().all()
 
 
 def test_no_valid_qcl_files_raises_error(tmp_path):

@@ -1,3 +1,4 @@
+import os
 import re
 from pathlib import Path
 
@@ -5,6 +6,17 @@ import pandas as pd
 
 _PATTERN_REGEX = re.compile(r"^pattern(\d+)$")
 _WAVENUMBER_REGEX = re.compile(r"^lineScan_(\d+)_0invcm\.csv$")
+
+
+def _file_creation_time(file_path: Path) -> tuple[float, str]:
+    """Return the best available cross-platform file creation timestamp."""
+
+    stat = file_path.stat()
+    if hasattr(stat, "st_birthtime"):
+        return float(stat.st_birthtime), "birthtime"
+    if os.name == "nt":
+        return float(stat.st_ctime), "creation_time"
+    return float(stat.st_mtime), "modified_time_fallback"
 
 
 def index_qcl_dataset(stacks_path: str | Path) -> pd.DataFrame:
@@ -38,6 +50,7 @@ def index_qcl_dataset(stacks_path: str | Path) -> pd.DataFrame:
                 continue
 
             wavenumber = int(wn_match.group(1))
+            created_timestamp, timestamp_source = _file_creation_time(file_path)
 
             records.append(
                 {
@@ -45,6 +58,8 @@ def index_qcl_dataset(stacks_path: str | Path) -> pd.DataFrame:
                     "pattern": pattern_dir.name,
                     "wavenumber": wavenumber,
                     "path": file_path,
+                    "created_timestamp": created_timestamp,
+                    "timestamp_source": timestamp_source,
                 }
             )
 

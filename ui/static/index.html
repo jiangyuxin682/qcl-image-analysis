@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>QCL Image Workbench</title>
-    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/styles.css?v=20260906-timelapse-time-2" />
   </head>
   <body>
     <div id="toast" class="toast" role="status"></div>
@@ -43,16 +43,16 @@
       </section>
 
       <section class="panel step-panel" data-panel="2">
-        <div class="section-intro"><div><span class="kicker">02 · RAW MCT INTENSITY</span><h2>Inspect the gold reference</h2><p>Red marks identify the brightest pixels used for each image's I<sub>goldref</sub>.</p></div><div class="inline-controls"><label>Pattern A<select id="pattern-a"></select></label><label>Pattern B<select id="pattern-b"></select></label></div></div>
-        <div class="card"><div class="card-head"><div><h3>Raw image comparison</h3><p>Display contrast never changes stored values.</p></div><div class="contrast"><span>Contrast</span><input id="raw-low" type="number" value="1" min="0" max="98"/><span>–</span><input id="raw-high" type="number" value="99" min="2" max="100"/><span>%</span><button class="ghost" id="refresh-raw">Apply</button></div></div><div id="raw-grid" class="image-grid"></div></div>
-        <div class="card"><div class="card-head"><div><h3>I<sub>goldref</sub> stability</h3><p>Each wavenumber is evaluated independently. Hollow red points are flagged.</p></div><div class="legend"><span class="good-dot"></span> valid <span class="bad-dot"></span> flagged</div></div><canvas id="trend-chart" height="300"></canvas></div>
+        <div class="section-intro"><div><span class="kicker">02 · RAW MCT INTENSITY</span><h2>Inspect the gold reference</h2><p>Bright green marks identify the brightest pixels used for each image's I<sub>goldref</sub>.</p></div><div class="inline-controls"><label>Pattern A<select id="pattern-a"></select></label><label>Pattern B<select id="pattern-b"></select></label></div></div>
+        <div class="card"><div class="card-head"><div><h3>Raw image comparison</h3><p>Display contrast never changes stored values or exported metadata.</p></div><div class="contrast"><span>Contrast</span><input id="raw-low" type="number" value="1" min="0" max="98"/><span>–</span><input id="raw-high" type="number" value="99" min="2" max="100"/><span>%</span><button class="ghost" id="refresh-raw">Apply</button></div></div><div id="raw-grid" class="image-grid"></div></div>
+        <div class="card"><div class="card-head"><div><h3>I<sub>goldref</sub> stability</h3><p>Each wavenumber is evaluated independently. Hollow red points are flagged; consecutive flagged patterns are grouped below.</p></div><div class="legend"><span class="good-dot"></span> valid <span class="bad-dot"></span> flagged</div></div><canvas id="trend-chart" height="320"></canvas></div>
         <div class="next-row"><button class="primary" data-go="3">Continue to reflectance <span>→</span></button></div>
       </section>
 
       <section class="panel step-panel" data-panel="3">
         <div class="section-intro"><div><span class="kicker">03 · REFLECTANCE</span><h2>Divide the spatial regions</h2><p>Draw non-overlapping on-MS and out-MS rectangles. The same coordinates apply to every selected pattern and wavenumber.</p></div></div>
         <div class="workspace-grid">
-          <div class="card image-workspace"><div class="card-head"><div><h3>Full reflectance</h3><p id="region-image-label"></p></div><div class="inline-controls compact"><label>Pattern<select id="region-pattern"></select></label><label>Wavenumber<select id="region-wn"></select></label></div></div><div class="canvas-wrap"><canvas id="region-canvas"></canvas><div id="region-empty" class="canvas-empty">Loading image…</div></div><div class="image-hint">Choose a region, then drag directly on the image. Coordinates use x:[min, max), y:[min, max).</div></div>
+          <div class="card image-workspace"><div class="card-head"><div><h3>Full reflectance</h3><p id="region-image-label"></p></div><div class="inline-controls compact"><label>Pattern<select id="region-pattern"></select></label><label>Wavenumber<select id="region-wn"></select></label></div></div><div class="canvas-wrap"><canvas id="region-canvas"></canvas><div id="region-colorbar" class="colorbar"></div><div id="region-empty" class="canvas-empty">Loading image…</div></div><div class="image-hint">Choose a region, then drag directly on the image. Coordinates use x:[min, max), y:[min, max).</div></div>
           <div class="card control-card"><h3>Region definition</h3><div class="segmented"><button class="active" data-region-mode="on">on-MS</button><button data-region-mode="out">out-MS</button></div><div class="roi-block on"><div class="roi-title"><span class="swatch teal"></span><b>on-MS</b><small>metasurface</small></div><div class="coords" data-roi="on"></div></div><div class="roi-block out"><div class="roi-title"><span class="swatch amber"></span><b>out-MS</b><small>outside metasurface</small></div><div class="coords" data-roi="out"></div></div><button class="primary full" id="confirm-regions">Confirm regions <span>→</span></button><p class="microcopy">Both regions are cropped from the original reflectance arrays.</p></div>
         </div>
       </section>
@@ -61,7 +61,7 @@
         <div class="section-intro"><div><span class="kicker">04 · CELL-FREE REFERENCE</span><h2>Select independent R₀ regions</h2><p>Pick a representative cell-free area inside each crop. Every pattern and wavenumber receives its own R₀.</p></div></div>
         <div class="reference-tabs"><button class="active" data-ref-tab="on">on-MS reference</button><button data-ref-tab="out">out-MS reference</button></div>
         <div class="workspace-grid">
-          <div class="card image-workspace"><div class="card-head"><div><h3 id="r0-image-title">on-MS reflectance</h3><p>Drag to define the cell-free reference.</p></div><div class="inline-controls compact"><label>Pattern<select id="r0-pattern"></select></label><label>Wavenumber<select id="r0-wn"></select></label></div></div><div class="canvas-wrap"><canvas id="r0-canvas"></canvas><div id="r0-empty" class="canvas-empty">Loading crop…</div></div></div>
+          <div class="card image-workspace"><div class="card-head"><div><h3 id="r0-image-title">on-MS reflectance</h3><p>Drag to define the cell-free reference.</p></div><div class="inline-controls compact"><label>Pattern<select id="r0-pattern"></select></label><label>Wavenumber<select id="r0-wn"></select></label></div></div><div class="canvas-wrap"><canvas id="r0-canvas"></canvas><div id="r0-colorbar" class="colorbar"></div><div id="r0-empty" class="canvas-empty">Loading crop…</div></div></div>
           <div class="card control-card"><h3>Cell-free ROI</h3><div class="roi-block on"><div class="roi-title"><span class="swatch teal"></span><b id="r0-region-label">on-MS R₀</b></div><div class="coords" data-roi="r0"></div></div><div class="callout"><b>Original values only</b><p>Contrast changes affect display only. R₀ is always calculated from the unmodified reflectance array.</p></div><button class="primary full" id="calculate-btn">Calculate absorbance <span>→</span></button></div>
         </div>
         <div id="r0-results" class="card hidden"><div class="card-head"><div><h3>R₀ summary</h3><p>Independent mean reflectance for each image.</p></div></div><div class="table-wrap"><table><thead><tr><th>Region</th><th>Pattern</th><th>Wavenumber</th><th>R₀</th></tr></thead><tbody id="r0-table"></tbody></table></div></div>
@@ -69,9 +69,9 @@
 
       <section class="panel step-panel" data-panel="5">
         <div class="section-intro"><div><span class="kicker">05 · ABSORBANCE</span><h2>Review normalized images</h2><p>on-MS and out-MS have been normalized independently using A = −log₁₀(R / R₀).</p></div><div class="inline-controls"><label>View<select id="result-region"><option value="on">on-MS</option><option value="out">out-MS</option></select></label></div></div>
-        <div class="card"><div class="card-head"><div><h3 id="result-title">Absorbance — on-MS</h3><p>Shared percentile settings support visual comparison; exported arrays retain all values.</p></div><div class="contrast"><span>Contrast</span><input id="result-low" type="number" value="1" min="0" max="98"/><span>–</span><input id="result-high" type="number" value="99" min="2" max="100"/><span>%</span><button class="ghost" id="refresh-results">Apply</button></div></div><div id="result-grid" class="image-grid"></div></div>
+        <div class="card"><div class="card-head"><div><h3 id="result-title">Absorbance — on-MS</h3><p>Contrast is display-only and is never written to processed arrays or exported metadata.</p></div><div class="contrast"><span>Contrast</span><input id="result-low" type="number" value="1" min="0" max="98"/><span>–</span><input id="result-high" type="number" value="99" min="2" max="100"/><span>%</span><button class="ghost" id="refresh-results">Apply</button></div></div><div id="result-grid" class="image-grid"></div></div>
         <div class="card timelapse-card">
-          <div class="card-head"><div><h3>Absorbance timelapse</h3><p>Build a playback sequence across a selected pattern range using one shared display scale.</p></div></div>
+          <div class="card-head"><div><h3>Absorbance timelapse</h3><p>All frames share one display-only scale; its contrast settings are not exported.</p></div></div>
           <div class="timelapse-settings">
             <label><span>Region</span><select id="timelapse-region"><option value="on">on-MS</option><option value="out">out-MS</option></select></label>
             <label><span>Wavenumber</span><select id="timelapse-wn"></select></label>
@@ -85,7 +85,14 @@
           <div id="timelapse-player" class="timelapse-player hidden">
             <div class="timelapse-screen">
               <img id="timelapse-image" alt="Absorbance timelapse frame"/>
+              <div id="timelapse-colorbar" class="colorbar"></div>
               <div class="frame-badge"><b id="timelapse-pattern"></b><span id="timelapse-qc"></span></div>
+            </div>
+            <div class="timestamp-bar" aria-label="Timelapse acquisition times">
+              <div><span>t₀</span><b id="timelapse-t0"></b></div>
+              <div><span>t<sub>end</sub></span><b id="timelapse-tend"></b></div>
+              <div><span>dt (hh:mm)</span><b id="timelapse-dt"></b></div>
+              <div><span>t − t₀</span><b id="timelapse-elapsed"></b></div>
             </div>
             <div class="player-controls">
               <button class="play-button" id="timelapse-play" aria-label="Play timelapse">▶</button>
@@ -98,6 +105,6 @@
         <div class="two-col"><div class="card"><div class="card-head"><div><h3>Reference-region sanity check</h3><p>Mean absorbance inside each R₀ ROI should be close to zero.</p></div></div><div class="table-wrap"><table><thead><tr><th>Region</th><th>Pattern</th><th>cm⁻¹</th><th>Mean A</th></tr></thead><tbody id="check-table"></tbody></table></div></div><div class="card export-card"><span class="export-icon">↓</span><h3>Analysis complete</h3><p>Download reflectance and absorbance CSVs, QC flags, R₀ summaries, checks, and processing metadata.</p><a class="primary full download" href="/api/export">Download results .zip</a></div></div>
       </section>
     </main>
-    <script src="/app.js"></script>
+    <script src="/app.js?v=20260906-timelapse-time-2"></script>
   </body>
 </html>
