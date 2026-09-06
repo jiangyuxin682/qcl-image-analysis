@@ -4,6 +4,8 @@ import pytest
 
 from qcl_analysis.qc import (
     DatasetValidationError,
+    add_frame_quality_flags,
+    add_reference_quality_flags,
     find_incomplete_frames,
     validate_dataset_index,
     validate_image_files,
@@ -147,3 +149,117 @@ def test_validate_image_files_detects_shape_mismatch(tmp_path):
         match="shape mismatch",
     ):
         validate_image_files(dataset)
+
+
+def test_reference_quality_detects_low_outlier():
+    dataset = pd.DataFrame(
+        {
+            "frame": [0, 1, 2, 3, 4],
+            "pattern": [
+                "pattern0",
+                "pattern1",
+                "pattern2",
+                "pattern3",
+                "pattern4",
+            ],
+            "wavenumber": [
+                1600,
+                1600,
+                1600,
+                1600,
+                1600,
+            ],
+            "i_goldref": [
+                10.0,
+                10.1,
+                9.9,
+                10.0,
+                0.2,
+            ],
+        }
+    )
+
+    result = add_reference_quality_flags(dataset)
+
+    assert not result.loc[
+        4,
+        "reference_valid",
+    ]
+
+    assert (
+        result.loc[
+            4,
+            "quality_reason",
+        ]
+        == "low_reference"
+    )
+
+
+def test_frame_quality_detects_reference_outlier():
+    dataset = pd.DataFrame(
+        {
+            "frame": [0, 0, 1, 1],
+            "wavenumber": [
+                1600,
+                1655,
+                1600,
+                1655,
+            ],
+            "reference_valid": [
+                True,
+                True,
+                True,
+                False,
+            ],
+        }
+    )
+
+    result = add_frame_quality_flags(
+        dataset,
+        expected_wavenumbers={
+            1600,
+            1655,
+        },
+    )
+
+    assert result.loc[
+        result["frame"] == 0,
+        "frame_valid",
+    ].all()
+
+    assert not result.loc[
+        result["frame"] == 1,
+        "frame_valid",
+    ].any()
+
+
+def test_frame_quality_detects_missing_wavenumber():
+    dataset = pd.DataFrame(
+        {
+            "frame": [0, 0, 1],
+            "wavenumber": [
+                1600,
+                1655,
+                1600,
+            ],
+            "reference_valid": [
+                True,
+                True,
+                True,
+            ],
+        }
+    )
+
+    result = add_frame_quality_flags(
+        dataset,
+        expected_wavenumbers={
+            1600,
+            1655,
+        },
+    )
+
+    frame1 = result[result["frame"] == 1]
+
+    assert not frame1["frame_valid"].all()
+
+    assert frame1["frame_quality_reason"].iloc[0] == "missing_wavenumber:1655"

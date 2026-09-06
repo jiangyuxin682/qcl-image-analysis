@@ -25,6 +25,11 @@ dev = [
     "ruff",
 ]
 
+notebook = [
+    "ipykernel",
+    "ipympl",
+    "ipywidgets",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
