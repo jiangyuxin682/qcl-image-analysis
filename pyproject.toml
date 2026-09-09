@@ -16,6 +16,7 @@ dependencies = [
     "pandas",
     "matplotlib",
     "pyyaml",
+    "scikit-image>=0.25,<0.27",
 ]
 
 
