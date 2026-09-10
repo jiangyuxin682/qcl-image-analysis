@@ -327,8 +327,8 @@ class AnalysisState:
         *,
         start_frame: int | None = None,
         end_frame: int | None = None,
-        low: float = 1.0,
-        high: float = 99.0,
+        low: float = 0.0,
+        high: float = 100.0,
         exclude_invalid: bool = False,
     ) -> dict:
         if not 0 <= low < high <= 100:
@@ -494,8 +494,8 @@ STATE = AnalysisState()
 def render_png(
     image: np.ndarray,
     *,
-    low: float = 1,
-    high: float = 99,
+    low: float = 0,
+    high: float = 100,
     cmap: str = "inferno",
     brightest: int = 0,
     limits: tuple[float, float] | None = None,
@@ -595,8 +595,8 @@ def render_png(
 def render_svg(
     image: np.ndarray,
     *,
-    low: float = 1,
-    high: float = 99,
+    low: float = 0,
+    high: float = 100,
     cmap: str = "inferno",
     brightest: int = 0,
     limits: tuple[float, float] | None = None,
@@ -698,8 +698,8 @@ def render_svg(
 def render_data_png(
     image: np.ndarray,
     *,
-    low: float = 1,
-    high: float = 99,
+    low: float = 0,
+    high: float = 100,
     cmap: str = "inferno",
     brightest: int = 0,
     limits: tuple[float, float] | None = None,
@@ -773,8 +773,8 @@ class Handler(SimpleHTTPRequestHandler):
                         end_frame=(
                             int(q["end_frame"][0]) if "end_frame" in q else None
                         ),
-                        low=float(q.get("low", [1])[0]),
-                        high=float(q.get("high", [99])[0]),
+                        low=float(q.get("low", [0])[0]),
+                        high=float(q.get("high", [100])[0]),
                         exclude_invalid=q.get("exclude_invalid", ["false"])[0]
                         == "true",
                     )
@@ -810,8 +810,8 @@ class Handler(SimpleHTTPRequestHandler):
                     q["pattern"][0],
                     int(q["wavenumber"][0]),
                 )
-                low = float(q.get("low", [1])[0])
-                high = float(q.get("high", [99])[0])
+                low = float(q.get("low", [0])[0])
+                high = float(q.get("high", [100])[0])
                 scale_patterns = [
                     pattern
                     for pattern in q.get("scale_patterns", [""])[0].split(",")

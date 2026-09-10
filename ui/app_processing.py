@@ -23,8 +23,10 @@ import os
 import re
 import sys
 import threading
+import time
 import webbrowser
 import zipfile
+import uuid
 from dataclasses import asdict
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -46,6 +48,7 @@ from qcl_analysis.absorbance import calculate_absorbance
 from qcl_analysis.baseline import correct_absorbance_baselines
 from qcl_analysis.cnr import compare_stage_cnr
 from qcl_analysis.cropping import crop_image
+from qcl_analysis.drift import gold_drift_rois
 from qcl_analysis.flat_field import FlatFieldResult, rolling_ball_flat_field
 from qcl_analysis.fourier import (
     FourierFilterResult,
@@ -58,6 +61,7 @@ from qcl_analysis.qc import add_frame_quality_flags, add_reference_quality_flags
 from qcl_analysis.reflectance import calculate_gold_reference
 from qcl_analysis.roi import ROI
 from ui.app import render_data_png
+from ui.video_export import encode_video
 
 STATIC = Path(__file__).with_name("static_processing")
 FILE_RE = re.compile(r"^lineScan_(\d+)_0invcm\.csv$", re.IGNORECASE)
@@ -188,6 +192,9 @@ class ProcessingState:
 
     def __init__(self):
         self.lock = threading.RLock()
+        self.progress_lock = threading.Lock()
+        self.progress = {"status": "idle", "completed": 0, "total": 0}
+        self.last_video = None
         self.dataset = None
         self.path = None
         self.version = 0
@@ -202,6 +209,8 @@ class ProcessingState:
         self.ref = {}
         self.qc = pd.DataFrame()
         self.on_roi = None
+        self.on_rois = {}
+        self.drift = {}
         self.crops = {}
         self.clear_processed()
 
@@ -335,17 +344,39 @@ class ProcessingState:
             "qc": selected.drop(columns="path").to_dict(orient="records"),
         }
 
-    def crop(self, payload):
+    def crop_plan(self, payload):
+        """Preview exactly the crop coordinates later used by every stage."""
         self.require("configured")
         roi = roi_from(payload["roi"])
-        crops = {key: crop_image(a, roi) for key, a in self.ref.items()}
+        drift = payload.get("drift", {})
+        rois = {pattern: roi for pattern in self.patterns}
+        records = []
+        if drift.get("enabled", False):
+            pattern = drift["reference_pattern"]
+            wn = integer(drift["wavenumber"], "Drift reference wavenumber")
+            if pattern not in self.patterns or wn not in self.bands:
+                raise ValueError("Choose a configured drift reference pattern and band.")
+            rois, records = gold_drift_rois(
+                {p: self.ref[(p, wn)] for p in self.patterns}, pattern, roi,
+                drift.get("side", "both"), integer(drift.get("max_shift", 20), "Maximum drift")
+            )
+        for key, image in self.ref.items():
+            crop_image(image, rois[key[0]], copy=False)
+        return {"rois": {p: asdict(r) for p, r in rois.items()}, "records": records}
+
+    def crop(self, payload):
+        plan = self.crop_plan(payload)
+        roi = roi_from(payload["roi"])
+        rois = {p: roi_from(r) for p, r in plan["rois"].items()}
+        crops = {key: crop_image(a, rois[key[0]]) for key, a in self.ref.items()}
         if min(next(iter(crops.values())).shape) < 2:
             raise ValueError("The on-MS crop must be at least 2 × 2 pixels.")
-        self.on_roi, self.crops = roi, crops
+        self.on_roi, self.on_rois, self.crops = roi, rois, crops
+        self.drift = {"settings": payload.get("drift", {}), "records": plan["records"]}
         self.clear_processed()
         self.stage = "cropped"
         self.version += 1
-        return {**self.status(), "shape": list(next(iter(crops.values())).shape)}
+        return {**self.status(), **plan, "shape": list(next(iter(crops.values())).shape)}
 
     @staticmethod
     def process_image(image, payload):
@@ -441,7 +472,7 @@ class ProcessingState:
         image = self.crops[key]
         output, flat = self.process_image(image, payload)
         arrays = [image, output.filtered, flat.corrected]
-        low, high = float(payload.get("low", 1)), float(payload.get("high", 99))
+        low, high = float(payload.get("low", 0)), float(payload.get("high", 100))
         if not 0 <= low < high <= 100:
             raise ValueError("Display percentiles must satisfy 0 <= low < high <= 100.")
         limits = self.limits(arrays, low, high)
@@ -539,12 +570,38 @@ class ProcessingState:
             "invalid_pixels": int((~flat.valid_mask).sum()),
         }
 
+    def processing_progress(self):
+        """Read progress without acquiring the long-running analysis lock."""
+        with self.progress_lock:
+            result = dict(self.progress)
+        started = result.pop("started", None)
+        ended = result.pop("ended", None)
+        result["elapsed_seconds"] = (ended or time.monotonic()) - started if started else 0
+        return result
+
+    def set_progress(self, **values):
+        with self.progress_lock:
+            self.progress.update(values)
+
     def process(self, payload):
+        self.set_progress(status="running", completed=0, total=len(self.crops),
+                          pattern=None, wavenumber=None, started=time.monotonic(), ended=None)
+        try:
+            result = self._process_batch(payload)
+        except Exception:
+            self.set_progress(status="failed", ended=time.monotonic())
+            raise
+        self.set_progress(status="complete", ended=time.monotonic())
+        return result
+
+    def _process_batch(self, payload):
         self.require("cropped")
         f, r = payload["fourier"], payload["rolling"]
         ff, flat = {}, {}
-        for key, image in self.crops.items():
+        for index, (key, image) in enumerate(self.crops.items()):
+            self.set_progress(pattern=key[0], wavenumber=key[1])
             ff[key], flat[key] = self.process_image(image, payload)
+            self.set_progress(completed=index + 1)
         self.ff, self.flat = ff, flat
         self.parameters = json.loads(json.dumps({"fourier": f, "rolling": r}))
         self.clear_absorbance()
@@ -638,7 +695,7 @@ class ProcessingState:
     def stage_arrays(self, key):
         self.require("cropped")
         return {
-            "raw": crop_image(self.raw[key], self.on_roi),
+            "raw": crop_image(self.raw[key], self.on_rois[key[0]]),
             "reflectance": self.crops[key],
             "fourier": self.ff[key].filtered if key in self.ff else None,
             "rolling": self.flat[key].corrected if key in self.flat else None,
@@ -664,7 +721,7 @@ class ProcessingState:
         return {"records": rows, "rois": self.cnr_rois}
 
     @staticmethod
-    def limits(arrays, low=1, high=99):
+    def limits(arrays, low=0, high=100):
         values = np.concatenate([a[np.isfinite(a)] for a in arrays if a is not None])
         if not values.size:
             return (0.0, 1.0)
@@ -677,7 +734,7 @@ class ProcessingState:
         if key not in self.ref:
             raise ValueError("Choose a configured pattern and wavenumber.")
         kind = payload.get("kind", "full_reflectance")
-        low, high = float(payload.get("low", 1)), float(payload.get("high", 99))
+        low, high = float(payload.get("low", 0)), float(payload.get("high", 100))
         if not 0 <= low < high <= 100:
             raise ValueError("Display percentiles must satisfy 0 <= low < high <= 100.")
         extra = {}
@@ -828,7 +885,23 @@ class ProcessingState:
             png, _, _ = render_data_png(a, limits=limits)
             f["png"] = base64.b64encode(png).decode()
             f["elapsed_seconds"] = f["timestamp"] - frames[0]["timestamp"]
-        return {
+        extrema = []
+        for frame, array in zip(frames, arrays):
+            finite = array[np.isfinite(array)]
+            if finite.size:
+                extrema.append((frame['pattern'], float(finite.min()), float(finite.max())))
+        if extrema:
+            minimum = min(row[1] for row in extrema)
+            maximum = max(row[2] for row in extrema)
+            min_patterns = ', '.join(row[0] for row in extrema if row[1] == minimum)
+            max_patterns = ', '.join(row[0] for row in extrema if row[2] == maximum)
+            extrema_label = f"Data extrema · Max absorbance {maximum:.4f}: {max_patterns} · Min absorbance {minimum:.4f}: {min_patterns}"
+        else:
+            extrema_label = "Data extrema: no finite absorbance values"
+        self.last_video = {
+            "extrema_label": extrema_label,
+            "video_id": uuid.uuid4().hex,
+            "version": self.version,
             "frames": frames,
             "wavenumber": wn,
             "kind": kind,
@@ -842,6 +915,7 @@ class ProcessingState:
             if len(frames) > 1
             else 0,
         }
+        return self.last_video
 
     def export(self):
         self.require("complete")
@@ -853,6 +927,8 @@ class ProcessingState:
             "processed_wavenumbers": self.bands,
             "n_reference_pixels": self.n_pixels,
             "on_ms_roi": asdict(self.on_roi),
+            "on_ms_rois_by_pattern": {p: asdict(r) for p, r in self.on_rois.items()},
+            "drift_correction": self.drift,
             "cell_free_roi_local": asdict(self.r0_roi) if self.r0_roi else None,
             "cell_free_selection": self.r0_selection,
             "roi_coordinates": "half-open pixel coordinates; cell-free and CNR ROIs local to on-MS crop",
@@ -952,6 +1028,8 @@ class Handler(BaseHTTPRequestHandler):
             if url.path in assets:
                 name, mime = assets[url.path]
                 return self.send((STATIC / name).read_bytes(), mime)
+            if url.path == "/api/process-progress":
+                return self.json(STATE.processing_progress())
             with STATE.lock:
                 if url.path == "/api/status":
                     return self.json(STATE.status())
@@ -985,10 +1063,18 @@ class Handler(BaseHTTPRequestHandler):
             if not 0 < length <= 1_000_000:
                 raise ValueError("Invalid request size.")
             payload = json.loads(self.rfile.read(length))
+            if self.path == "/api/export-video":
+                with STATE.lock:
+                    video = STATE.last_video
+                    if not video or video['video_id'] != payload.get('video_id') or video['version'] != STATE.version:
+                        raise ValueError("Rebuild the current video before exporting.")
+                data = encode_video(video, float(payload['fps']), payload['labels'])
+                return self.send(data, "video/mp4")
             routes = {
                 "/api/discover": STATE.discover,
                 "/api/configure": STATE.configure,
                 "/api/crop": STATE.crop,
+                "/api/crop-preview": STATE.crop_plan,
                 "/api/process": STATE.process,
                 "/api/preview": STATE.preview,
                 "/api/calculate": STATE.calculate,
