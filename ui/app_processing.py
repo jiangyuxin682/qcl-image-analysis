@@ -4,7 +4,7 @@ Run ``python ui/app_processing.py`` from the repository (default port 8766).
 Filename discovery precedes explicit center/reference-band assignment. The
 union of selected bands is processed independently for each selected pattern:
 full raw normalization -> shared on-MS crop -> Fourier -> rolling-ball field
--> shared cell-free ROI/per-image R0 -> absorbance -> pixelwise baseline -> CNR.
+-> per-image cell-free reference -> absorbance -> pixelwise baseline -> CNR.
 
 All operations run locally. Mutations commit complete results under a lock and
 invalidate dependent stages. Raw files are never changed. This module reuses
@@ -40,13 +40,15 @@ os.environ.setdefault(
 
 import numpy as np
 import pandas as pd
+from scipy.ndimage import maximum_filter
 
-from qcl_analysis.absorbance import calculate_absorbance, calculate_r0
+from qcl_analysis.absorbance import calculate_absorbance
 from qcl_analysis.baseline import correct_absorbance_baselines
 from qcl_analysis.cnr import compare_stage_cnr
 from qcl_analysis.cropping import crop_image
-from qcl_analysis.flat_field import rolling_ball_flat_field
+from qcl_analysis.flat_field import FlatFieldResult, rolling_ball_flat_field
 from qcl_analysis.fourier import (
+    FourierFilterResult,
     apply_fourier_lowpass_filter,
     apply_fourier_notch_filter,
     fourier_spectrum,
@@ -93,6 +95,25 @@ def roi_from(payload):
     return ROI(
         **{k: integer(payload[k], k) for k in ("x_min", "x_max", "y_min", "y_max")}
     )
+
+
+def select_cell_free_pixels(image, method, count):
+    """Return stable (y, x) coordinates for extreme positive finite pixels."""
+    if method not in {"brightest", "darkest"}:
+        raise ValueError("Cell-free pixel method must be brightest or darkest.")
+    count = integer(count, "Cell-free pixel count")
+    if count < 1:
+        raise ValueError("Cell-free pixel count must be at least 1.")
+    image = np.asarray(image, dtype=float)
+    valid_flat = np.flatnonzero(np.isfinite(image.ravel()) & (image.ravel() > 0))
+    if count > valid_flat.size:
+        raise ValueError(
+            f"Cell-free pixel count ({count}) exceeds the number of positive finite pixels ({valid_flat.size})."
+        )
+    values = image.ravel()[valid_flat]
+    order = np.argsort(-values if method == "brightest" else values, kind="stable")
+    selected = valid_flat[order[:count]]
+    return np.column_stack(np.unravel_index(selected, image.shape)).astype(int)
 
 
 def discover_files(path):
@@ -192,6 +213,8 @@ class ProcessingState:
 
     def clear_absorbance(self):
         self.r0_roi = None
+        self.r0_selection = {"method": "roi"}
+        self.r0_pixels = {}
         self.absorbance = {}
         self.baselines = {}
         self.r0_records = []
@@ -219,6 +242,7 @@ class ProcessingState:
             "mapping": self.mapping,
             "on_roi": asdict(self.on_roi) if self.on_roi else None,
             "r0_roi": asdict(self.r0_roi) if self.r0_roi else None,
+            "r0_selection": self.r0_selection,
         }
 
     def discover(self, payload):
@@ -323,13 +347,14 @@ class ProcessingState:
         self.version += 1
         return {**self.status(), "shape": list(next(iter(crops.values())).shape)}
 
-    def process(self, payload):
-        self.require("cropped")
+    @staticmethod
+    def process_image(image, payload):
+        """Run enabled stages identically for preview and committed batch results."""
         f = payload["fourier"]
         r = payload["rolling"]
-        ff, flat = {}, {}
-        mode = f.get("mode", "notch")
+        mode = f.get("mode", "notch") if f.get("enabled", True) else "none"
         allowed_f = {
+            "enabled",
             "mode",
             "centers",
             "sigma",
@@ -341,6 +366,7 @@ class ProcessingState:
             "preserve_mean",
         }
         allowed_r = {
+            "enabled",
             "radius",
             "kernel_height",
             "feature_polarity",
@@ -353,38 +379,172 @@ class ProcessingState:
             raise ValueError("Unknown processing parameter.")
         if mode not in {"notch", "lowpass", "none"}:
             raise ValueError("Choose notch, lowpass or none.")
-        for key, image in self.crops.items():
-            shared = {
-                "pad_pixels": integer(f.get("pad_pixels", 0), "Fourier padding"),
-                "preserve_mean": bool(f.get("preserve_mean", True)),
-            }
-            if mode == "lowpass":
-                output = apply_fourier_lowpass_filter(
-                    image,
-                    cutoff_x=float(f.get("cutoff_x", 0.15)),
-                    cutoff_y=float(f.get("cutoff_y", 0.15)),
-                    **shared,
-                )
-            else:
-                output = apply_fourier_notch_filter(
-                    image,
-                    f.get("centers", []) if mode == "notch" else [],
-                    sigma=float(f.get("sigma", 0.01)),
-                    strength=float(f.get("strength", 0.9)),
-                    protect_radius=float(f.get("protect_radius", 0.02)),
-                    **shared,
-                )
-            flat_output = rolling_ball_flat_field(
-                output.filtered,
-                radius=integer(r.get("radius", 30), "Rolling-ball radius"),
-                kernel_height=float(r.get("kernel_height", 0.05)),
-                feature_polarity=r.get("feature_polarity", "dark"),
-                smooth_sigma=float(r.get("smooth_sigma", 1)),
-                pad_pixels=integer(r.get("pad_pixels", 0), "Rolling padding"),
-                min_background=float(r.get("min_background", 1e-6)),
-                reference_level=r.get("reference_level"),
+        shared = {
+            "pad_pixels": integer(f.get("pad_pixels", 0), "Fourier padding"),
+            "preserve_mean": bool(f.get("preserve_mean", True)),
+        }
+        if mode == "none":
+            spectrum, fy, fx = fourier_spectrum(image)
+            output = FourierFilterResult(
+                image.copy(),
+                np.zeros_like(image),
+                np.ones_like(image),
+                spectrum,
+                spectrum.copy(),
+                fy,
+                fx,
             )
-            ff[key], flat[key] = output, flat_output
+        elif mode == "lowpass":
+            output = apply_fourier_lowpass_filter(
+                image,
+                cutoff_x=float(f.get("cutoff_x", 0.15)),
+                cutoff_y=float(f.get("cutoff_y", 0.15)),
+                **shared,
+            )
+        else:
+            output = apply_fourier_notch_filter(
+                image,
+                f.get("centers", []) if mode == "notch" else [],
+                sigma=float(f.get("sigma", 0.01)),
+                strength=float(f.get("strength", 0.9)),
+                protect_radius=float(f.get("protect_radius", 0.02)),
+                **shared,
+            )
+        if not r.get("enabled", True):
+            # Identity field: disabling rolling ball preserves every input value.
+            ones = np.ones_like(output.filtered)
+            flat_output = FlatFieldResult(
+                output.filtered.copy(),
+                ones,
+                ones.copy(),
+                np.isfinite(output.filtered),
+                np.zeros_like(output.filtered),
+                1.0,
+            )
+            return output, flat_output
+        flat_output = rolling_ball_flat_field(
+            output.filtered,
+            radius=integer(r.get("radius", 30), "Rolling-ball radius"),
+            kernel_height=float(r.get("kernel_height", 0.05)),
+            feature_polarity=r.get("feature_polarity", "dark"),
+            smooth_sigma=float(r.get("smooth_sigma", 1)),
+            pad_pixels=integer(r.get("pad_pixels", 0), "Rolling padding"),
+            min_background=float(r.get("min_background", 1e-6)),
+            reference_level=r.get("reference_level"),
+        )
+        return output, flat_output
+
+    def preview(self, payload):
+        """Preview only the selected crop without changing committed processing state."""
+        self.require("cropped")
+        key = (payload["pattern"], integer(payload["wavenumber"], "Wavenumber"))
+        image = self.crops[key]
+        output, flat = self.process_image(image, payload)
+        arrays = [image, output.filtered, flat.corrected]
+        low, high = float(payload.get("low", 1)), float(payload.get("high", 99))
+        if not 0 <= low < high <= 100:
+            raise ValueError("Display percentiles must satisfy 0 <= low < high <= 100.")
+        limits = self.limits(arrays, low, high)
+        cards = []
+        for title, array in zip(
+            ("Before processing", "After Fourier", "After rolling ball"), arrays
+        ):
+            png, lo, hi = render_data_png(array, limits=limits)
+            cards.append(
+                {
+                    "title": title,
+                    "png": base64.b64encode(png).decode(),
+                    "vmin": lo,
+                    "vmax": hi,
+                }
+            )
+        # Use the actual padded filtering spectra, not the Hann inspection FFT.
+        before = np.log1p(np.abs(output.spectrum_before))
+        after = np.log1p(np.abs(output.spectrum_after))
+        fft_limits = (0.0, max(float(before.max()), float(after.max()), 1e-12))
+        axes = (
+            f"fx: {output.fx[0]:.4f} to {output.fx[-1]:.4f}; "
+            f"fy: {output.fy[0]:.4f} (top) to {output.fy[-1]:.4f} (bottom), cycles/pixel"
+        )
+        diagnostics = []
+
+        def diagnostic(title, array, scale, caption, available=True):
+            if not available:
+                diagnostics.append(
+                    {
+                        "title": title,
+                        "available": False,
+                        "caption": "Rolling ball is bypassed; no background was estimated.",
+                    }
+                )
+                return
+            png, lo, hi = render_data_png(array, limits=scale)
+            diagnostics.append(
+                {
+                    "title": title,
+                    "available": True,
+                    "png": base64.b64encode(png).decode(),
+                    "vmin": lo,
+                    "vmax": hi,
+                    "caption": caption,
+                }
+            )
+
+        diagnostic(
+            "FFT before filtering",
+            before,
+            fft_limits,
+            "log(1 + FFT amplitude). Actual filtering FFT; no Hann window. " + axes,
+        )
+        diagnostic(
+            "Fourier transmission mask",
+            output.mask,
+            (0.0, 1.0),
+            "Transmission: 0 = rejected, 1 = retained. " + axes,
+        )
+        diagnostic(
+            "FFT after filtering",
+            after,
+            fft_limits,
+            "log(1 + FFT amplitude). Same scale as the input FFT. " + axes,
+        )
+        enabled = bool(payload["rolling"].get("enabled", True))
+        diagnostic(
+            "Estimated rolling-ball background",
+            flat.background,
+            self.limits([output.filtered, flat.background], low, high),
+            "Estimated illumination field (reflectance). Correction divides by this field and rescales; it is not subtracted.",
+            enabled,
+        )
+        diagnostic(
+            "Rolling-ball correction gain",
+            flat.gain,
+            self.limits([flat.gain], low, high),
+            "Gain = reference level / background. Corrected reflectance = input reflectance × gain.",
+            enabled,
+        )
+        removed = output.filtered - flat.corrected
+        finite = removed[np.isfinite(removed)]
+        bound = max(float(np.max(np.abs(finite))) if finite.size else 0.0, 1e-12)
+        diagnostic(
+            "Rolling-ball difference: input − corrected",
+            removed,
+            (-bound, bound),
+            "Signed change in reflectance, distinct from the estimated illumination background.",
+        )
+        return {
+            "images": cards,
+            "diagnostics": diagnostics,
+            "version": self.version,
+            "invalid_pixels": int((~flat.valid_mask).sum()),
+        }
+
+    def process(self, payload):
+        self.require("cropped")
+        f, r = payload["fourier"], payload["rolling"]
+        ff, flat = {}, {}
+        for key, image in self.crops.items():
+            ff[key], flat[key] = self.process_image(image, payload)
         self.ff, self.flat = ff, flat
         self.parameters = json.loads(json.dumps({"fourier": f, "rolling": r}))
         self.clear_absorbance()
@@ -405,23 +565,52 @@ class ProcessingState:
 
     def calculate(self, payload):
         self.require("processed")
-        roi = roi_from(payload["roi"])
+        method = payload.get("method", "roi")
+        if method not in {"roi", "brightest", "darkest"}:
+            raise ValueError("Unknown cell-free reference method.")
+        roi = roi_from(payload["roi"]) if method == "roi" else None
+        count = integer(payload.get("count", 1), "Cell-free pixel count") if method != "roi" else None
         absorbance, baselines, records = {}, {}, []
+        selections = {}
+        reference_bands = {}
+        pattern_pixels = {}
+        if method != "roi":
+            requested = payload.get("reference_bands", {})
+            for pattern in self.patterns:
+                wn = integer(requested.get(pattern, self.bands[0]), "Reference wavenumber")
+                if (pattern, wn) not in self.flat:
+                    raise ValueError(f"Choose a processed reference wavenumber for {pattern}.")
+                reference_bands[pattern] = wn
+                pattern_pixels[pattern] = select_cell_free_pixels(
+                    self.flat[(pattern, wn)].corrected, method, count
+                )
         for key, flat in self.flat.items():
-            reference = crop_image(flat.corrected, roi)
+            if method == "roi":
+                reference = crop_image(flat.corrected, roi)
+                yy, xx = np.mgrid[roi.y_min : roi.y_max, roi.x_min : roi.x_max]
+                pixels = np.column_stack((yy.ravel(), xx.ravel()))
+            else:
+                pixels = pattern_pixels[key[0]]
+                reference = flat.corrected[pixels[:, 0], pixels[:, 1]]
             if not np.isfinite(reference).all() or (reference <= 0).any():
                 raise ValueError(
-                    f"Cell-free ROI contains invalid reflectance at {key}. Select another region."
+                    f"Cell-free selection contains invalid reflectance at {key}. Select another reference."
                 )
-            r0 = calculate_r0(flat.corrected, roi)
+            r0 = float(np.mean(reference))
             a = calculate_absorbance(flat.corrected, r0)
             absorbance[key] = a
+            selections[key] = pixels
             records.append(
                 {
                     "pattern": key[0],
                     "wavenumber": key[1],
+                    "method": method,
+                    "reference_wavenumber": reference_bands.get(key[0]),
+                    "pixel_count": int(pixels.shape[0]),
                     "r0": r0,
-                    "reference_mean_absorbance": float(np.mean(a[roi.as_slices()])),
+                    "reference_mean_absorbance": float(
+                        np.mean(a[pixels[:, 0], pixels[:, 1]])
+                    ),
                 }
             )
         for pattern in self.patterns:
@@ -431,8 +620,12 @@ class ProcessingState:
             baselines.update(
                 {(pattern, int(wn)): result for wn, result in results.items()}
             )
-        self.r0_roi, self.absorbance, self.baselines, self.r0_records = (
+        self.r0_roi, self.r0_selection, self.r0_pixels = (
             roi,
+            {"method": method, **({"count": count, "reference_bands": reference_bands} if count is not None else {})},
+            selections,
+        )
+        self.absorbance, self.baselines, self.r0_records = (
             absorbance,
             baselines,
             records,
@@ -500,6 +693,32 @@ class ProcessingState:
             )
             array = np.log1p(np.abs(spectrum))
             extra = {"fy": fy.tolist(), "fx": fx.tolist()}
+            minimum = float(payload.get("min_frequency", 0.025))
+            if not 0 <= minimum < 0.5:
+                raise ValueError("Candidate minimum frequency must be in [0, 0.5).")
+            amplitude = np.abs(spectrum)
+            FY, FX = np.meshgrid(fy, fx, indexing="ij")
+            # Match notebook 06: local maxima, one half-plane, exclude the center.
+            candidates = (
+                (amplitude == maximum_filter(amplitude, size=5, mode="wrap"))
+                & (amplitude > 0)
+                & (np.hypot(FY, FX) > minimum)
+                & ((FY > 0) | ((FY == 0) & (FX > 0)))
+            )
+            positions = np.argwhere(candidates)
+            order = np.argsort(-amplitude[candidates], kind="stable")[:10]
+            extra["peaks"] = [
+                {
+                    "rank": rank,
+                    "iy": int(iy),
+                    "ix": int(ix),
+                    "fy": float(fy[iy]),
+                    "fx": float(fx[ix]),
+                    "period_pixels": float(1 / np.hypot(fy[iy], fx[ix])),
+                    "amplitude": float(amplitude[iy, ix]),
+                }
+                for rank, (iy, ix) in enumerate(positions[order], 1)
+            ]
         elif kind in {"mask", "background", "gain"}:
             self.require("processed")
             array = {
@@ -529,6 +748,25 @@ class ProcessingState:
                 )
             )
             limits = self.limits([arrays[k] for k in group], low, high)
+        if kind == "rolling" and payload.get("r0_method") in {
+            "brightest",
+            "darkest",
+        }:
+            wn = integer(payload.get("r0_reference_band", self.bands[0]), "Reference wavenumber")
+            if (key[0], wn) not in self.flat:
+                raise ValueError("Choose a processed reference wavenumber.")
+            pixels = select_cell_free_pixels(
+                self.flat[(key[0], wn)].corrected,
+                payload["r0_method"], payload.get("r0_count", 1)
+            )
+            extra["reference_wavenumber"] = wn
+            reference = array[pixels[:, 0], pixels[:, 1]]
+            if not np.isfinite(reference).all() or (reference <= 0).any():
+                raise ValueError("Selected reference positions contain invalid reflectance in this band.")
+            extra["cell_free_pixels"] = pixels.tolist()
+            extra["cell_free_r0"] = float(
+                np.mean(array[pixels[:, 0], pixels[:, 1]])
+            )
         png, lo, hi = render_data_png(
             array,
             low=low,
@@ -582,13 +820,20 @@ class ProcessingState:
                 )
         if not frames:
             raise ValueError("No processed frames are available for this selection.")
-        limits = self.limits(arrays)
+        low, high = float(payload.get("low", 0)), float(payload.get("high", 100))
+        if not 0 <= low < high <= 100:
+            raise ValueError("Contrast percentiles must satisfy 0 <= low < high <= 100.")
+        limits = self.limits(arrays, low, high)
         for f, a in zip(frames, arrays):
             png, _, _ = render_data_png(a, limits=limits)
             f["png"] = base64.b64encode(png).decode()
             f["elapsed_seconds"] = f["timestamp"] - frames[0]["timestamp"]
         return {
             "frames": frames,
+            "wavenumber": wn,
+            "kind": kind,
+            "low": low,
+            "high": high,
             "vmin": limits[0],
             "vmax": limits[1],
             "median_interval_seconds": float(
@@ -608,7 +853,8 @@ class ProcessingState:
             "processed_wavenumbers": self.bands,
             "n_reference_pixels": self.n_pixels,
             "on_ms_roi": asdict(self.on_roi),
-            "cell_free_roi_local": asdict(self.r0_roi),
+            "cell_free_roi_local": asdict(self.r0_roi) if self.r0_roi else None,
+            "cell_free_selection": self.r0_selection,
             "roi_coordinates": "half-open pixel coordinates; cell-free and CNR ROIs local to on-MS crop",
             "processing": self.parameters,
             "qc_settings": self.qc_settings,
@@ -645,8 +891,23 @@ class ProcessingState:
                         "background": self.flat[key].background,
                         "gain": self.flat[key].gain,
                         "flat_valid_mask": self.flat[key].valid_mask.astype(int),
+                        "cell_free_pixel_mask": np.zeros(
+                            self.crops[key].shape, dtype=int
+                        ),
                     }
                 )
+                pixels = self.r0_pixels[key]
+                arrays["cell_free_pixel_mask"][pixels[:, 0], pixels[:, 1]] = 1
+                coordinates = io.StringIO()
+                np.savetxt(
+                    coordinates,
+                    pixels,
+                    fmt="%d",
+                    delimiter=",",
+                    header="y,x",
+                    comments="",
+                )
+                z.writestr(f"{folder}/cell_free_pixels.csv", coordinates.getvalue())
                 if key in self.baselines:
                     arrays["linear_baseline"] = self.baselines[key].baseline
                     arrays["baseline_valid_mask"] = self.baselines[
@@ -729,6 +990,7 @@ class Handler(BaseHTTPRequestHandler):
                 "/api/configure": STATE.configure,
                 "/api/crop": STATE.crop,
                 "/api/process": STATE.process,
+                "/api/preview": STATE.preview,
                 "/api/calculate": STATE.calculate,
                 "/api/cnr": STATE.cnr,
                 "/api/timelapse": STATE.timelapse,

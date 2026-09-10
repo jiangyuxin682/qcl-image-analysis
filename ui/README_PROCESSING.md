@@ -21,9 +21,14 @@ Install the project with `python -m pip install -e '.[ui,dev]'` if needed.
    rolling-ball multiplicative flat-field correction to every selected image.
    Fourier can be bypassed explicitly. Parameter meanings appear next to the
    controls. Inspection-window settings affect only the spectrum preview.
-5. Select a shared cell-free ROI inside the corrected on-MS crop. Each image
-   gets its own R0, absorbance and then its configured pixelwise spectral
-   baseline correction. Two references interpolate; more fit least squares.
+5. Choose a shared rectangular cell-free ROI, or select a fixed number of the
+   brightest or darkest valid pixels in a chosen reference band for each pattern.
+   All bands within that pattern share those coordinates and calculate their
+   own R0 from their own reflectance values.
+   Thin cyan crosses identify the selected positions in the current preview. Each
+   image gets its own R0 and absorbance, followed by its configured pixelwise
+   spectral baseline correction. Two references interpolate; more fit least
+   squares.
 6. Inspect six stages with inferno. Different bands have independent scales;
    each band's three reflectance stages share a scale, as do its two absorbance
    stages. Draw shared CNR background and target ROIs. Export all selected
@@ -37,6 +42,30 @@ times are used when available, with modification-time fallback recorded.
 
 ## Scientific parameters and boundaries
 
+### Optional stages and live preview
+
+The Fourier and rolling-ball checkboxes independently enable each stage.
+A disabled stage passes its input values through unchanged. Its diagnostic
+mask/gain is one; a bypassed rolling-ball background is an identity field,
+not an estimated physical background. Both enabled flags are exported.
+
+The inspection spectrum shows up to ten candidate conjugate pairs, following
+notebook 06: 5-by-5 local maxima, one half-plane, and a central exclusion radius
+(default 0.025 cycles/pixel). Rankings use FFT amplitude before display scaling.
+The table shows both coordinates, period, amplitude, and Added/Not added status.
+Add pair and Remove pair update both conjugate coordinates together. Clicking Add pair or
+a spectrum point puts both signs into the notch list without duplicates.
+The underlying mask combines rejection by maximum, so explicitly listing both
+partners does not double the suppression. Candidates are not confirmed noise.
+
+Parameter edits automatically preview the current pattern and band after a
+450 ms pause. Preview runs at full crop resolution using the exact same
+processing function as batch processing, without changing committed arrays.
+Only one preview runs at a time; newer edits replace pending work and stale
+responses are discarded. Larger rolling-ball radii may take longer to update.
+The before/Fourier/rolling images share a reflectance scale. Use Process all
+involved bands to commit the settings before calculating absorbance and CNR.
+
 - Notch coordinates are `(fy, fx)` in cycles/pixel, unrelated to cm^-1. Their
   symmetric partners are added automatically. Sigma controls the Gaussian
   width, strength controls rejection depth, and protect radius passes low
@@ -46,9 +75,10 @@ times are used when available, with modification-time fallback recorded.
 - Rolling-ball radius is spatial pixels; cap height is reflectance units.
   Dark-feature mode estimates an upper background; bright-feature mode a lower
   background. Correction multiplies by median(background)/background.
-- The cell-free ROI must contain only finite positive values at every selected
-  image. Elsewhere nonpositive reflectance yields NaN absorbance, and invalid
-  selected reference pixels propagate to baseline results.
+- A rectangular cell-free ROI must contain only finite positive values in every
+  selected image. Extreme-pixel modes rank only finite positive reflectance,
+  break ties in row-major order, and reject counts larger than the available
+  pixels. Selection coordinates and a mask are exported for every image.
 - CNR is abs(target mean - background mean) / background sample standard
   deviation (ddof=1), using the common finite-pixel intersection per image
   across available stages. Undefined and unavailable values are null in JSON.
