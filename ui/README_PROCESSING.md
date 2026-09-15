@@ -21,7 +21,7 @@ Install the project with `python -m pip install -e '.[ui,dev]'` if needed.
    rolling-ball multiplicative flat-field correction to every selected image.
    Fourier can be bypassed explicitly. Parameter meanings appear next to the
    controls. Inspection-window settings affect only the spectrum preview.
-5. Choose a shared rectangular cell-free ROI, or select a fixed number of the
+5. Choose a shared rectangular analyte-free ROI, or select a fixed number of the
    brightest or darkest valid pixels in a chosen reference band for each pattern.
    All bands within that pattern share those coordinates and calculate their
    own R0 from their own reflectance values.
@@ -77,7 +77,7 @@ involved bands to commit the settings before calculating absorbance and CNR.
 - Rolling-ball radius is spatial pixels; cap height is reflectance units.
   Dark-feature mode estimates an upper background; bright-feature mode a lower
   background. Correction multiplies by median(background)/background.
-- A rectangular cell-free ROI must contain only finite positive values in every
+- A rectangular analyte-free ROI must contain only finite positive values in every
   selected image. Extreme-pixel modes rank only finite positive reflectance,
   break ties in row-major order, and reject counts larger than the available
   pixels. Selection coordinates and a mask are exported for every image.
@@ -116,7 +116,7 @@ the baseline at the center, and the center absorbance before and after
 subtraction. A table lists each reference's fitted value and residual. Two
 references interpolate; additional references use unweighted linear least
 squares. Invalid pixels are reported without substituting zero. Editing the
-cell-free selection hides these results until absorbance is recalculated.
+analyte-free selection hides these results until absorbance is recalculated.
 
 Video stages follow processing order: raw, reflectance, Fourier, rolling ball,
 absorbance before baseline, and absorbance after baseline.
@@ -158,3 +158,103 @@ Missing bands are listed, and differing image shapes are rejected. No spectral
 interpolation, normalization, cropping, or registration is applied. Plot lines
 only connect measured points. Inspection does not alter processing selections
 or committed results. Use Assign centers and baseline bands to continue.
+
+## Optional multi-folder comparison
+
+In section 1, check Compare multiple folders in dataset tabs, then open the
+multi-folder workspace. Add each folder (and optionally a dataset name) to
+create a tab. Tabs retain their own processing state and can be switched at
+any section; a folder that has not reached that section opens its latest
+available step. The original single-folder interface remains available.
+
+Center/reference mappings, gold-reference pixel count, QC thresholds,
+Fourier/rolling-ball parameters, and analyte-free method/count synchronize across
+tabs. Pattern selections, spatial ROIs, drift references, per-pattern analyte-free
+reference bands, CNR ROIs, and display limits remain independent. Changes to
+shared settings lock dependent steps in every affected tab until recomputed.
+Each folder is processed using its own buttons; processing one folder does not
+implicitly process the other folders.
+
+After calculating CNR in every folder, open Final comparison. Select a common
+stage and wavenumber, and independently choose each folder's pattern and display
+percentiles. Each image has its own colorbar, CNR parameters and ROI outlines.
+The page checks that committed shared settings agree before displaying results.
+Export all datasets downloads one ZIP with a result archive per folder and a
+JSON dataset/CNR summary. All datasets remain in local server memory; restarting
+the server clears them, and reloading the workspace resets the browser tabs.
+
+## Full-raw ROI absorbance spectrum
+
+Section 1 includes an independent **ROI absorbance spectrum** panel after file
+discovery. Select a pattern and preview wavenumber, then drag the cyan analyte
+rectangle and green analyte-free rectangle on the full raw MCT image. The
+preview band only assists selection; calculation reads every measured band
+available in that pattern. Both rectangles use full-image coordinates with
+exclusive upper bounds, and do not change the processing or analyte-free ROIs.
+Changing the pattern clears both rectangles; changing a rectangle clears the
+previous spectrum and disables export until recalculation.
+
+For each band, `I` and `I_bg` are the respective ROI means, and
+`A = -log10(I / I_bg)` (the ratio of means, not the mean of pixel absorbances).
+The two plots show the raw mean signals and absorbance. No normalization,
+baseline correction, registration or interpolation is performed. Non-finite
+ROI pixels or non-positive means invalidate the corresponding absorbance;
+invalid values appear as gaps, with a status in the table. Mismatched image
+shapes and out-of-bounds ROIs are rejected. Missing bands are reported.
+
+**Export CSV** includes measured wavenumber, `I`, `I_bg`, ratio, absorbance,
+status, pattern, preview band, ROI pixel counts and both rectangles' coordinates.
+Numeric exports preserve calculation precision. Color bar ticks use three
+fixed decimal places.
+
+ROI selection rectangles use opaque, unfilled 1 px dashed vector outlines,
+including the final folder comparison. Import data shows ROI spectra as lines
+without point markers; the separate full-raw single-pixel inspector is removed.
+
+The Section 1 **Assign centers and baseline bands** button opens the existing
+band editor inline. **Done · keep viewing spectrum** closes it without changing
+sections. Section 2 remains available through the sidebar. The same mapping is
+used for processing and spectrum annotations. Vertical dashed lines mark centers and their baseline references in the same
+color per group, with colored wavenumber labels on the horizontal axis. Use the
+center selector to inspect one center/reference group or all groups. Selected bands within the plotted wavenumber range are marked.
+
+Optional Savitzky–Golay (SG) smoothing applies only to the ROI absorbance curve.
+It defaults off, with an 11-band window and polynomial order 2. The window must
+be odd, at least 3, and no larger than the number of measured bands; the order
+must be non-negative and smaller than the window. SG requires finite absorbance
+and evenly spaced, increasing wavenumbers. No missing bands are interpolated.
+When enabled, the raw curve remains gray and the SG curve is black. Without SG, raw absorbance is black. CSV export retains raw absorbance and adds `absorbance_sg`,
+SG settings, and the center/reference mapping. This smoothing does not alter
+subsequent image processing or baseline correction.
+
+
+Section 1 preview wavenumbers are restricted to selected centers available in
+that pattern. The current selection is preserved when possible. With no
+available selected center, the preview is disabled and prompts for a center;
+the calculated spectrum still includes all measured bands, including references.
+
+The ROI spectrum supports independent Fourier and SG switches, both off by
+default. Fourier is a one-dimensional hard low-pass with a configurable cutoff
+in cycles per sampled band (default 0.1, range >0 to 0.5). It reflects N−1 samples
+on each side before the FFT, preserves frequencies at or below the cutoff, and
+crops the inverse FFT back to the original samples. At 0.5 all frequencies pass.
+When both switches are enabled, Fourier runs before SG. All enabled filters
+require finite values and uniformly spaced spectral samples.
+
+The main plot compares raw absorbance (gray) with the final output (black).
+Fourier diagnostics separately show raw versus Fourier output before SG,
+Fourier amplitudes before/after/removal, the cutoff and rejected frequency
+region, and the removed component (raw minus Fourier output). FFT amplitudes
+are |FFT| divided by the reflected sample count. CSV export includes raw,
+Fourier, SG and final absorbance columns, along with the enabled filters and
+settings. These filters do not alter later image processing stages.
+
+ROI Fourier filtering also offers **Notch** and **Low-pass + notch** modes.
+Enter one or more comma-separated notch centers in cycles/band (0 < f ≤ 0.5)
+and a full width. Each notch rejects frequencies within center ± width/2;
+zero frequency (DC) is preserved. Combined mode rejects the union of the
+notches and frequencies above the low-pass cutoff. The frequency plot labels
+each notch center and shades rejected ranges. The status reports how many FFT
+bins were removed; very narrow notches may contain no sampled frequency bins.
+CSV metadata includes the mode, notch centers and width. SG, if enabled, still
+runs after the chosen Fourier filter.

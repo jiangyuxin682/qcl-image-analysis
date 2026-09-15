@@ -4,7 +4,7 @@ Run ``python ui/app_processing.py`` from the repository (default port 8766).
 Filename discovery precedes explicit center/reference-band assignment. The
 union of selected bands is processed independently for each selected pattern:
 full raw normalization -> shared on-MS crop -> Fourier -> rolling-ball field
--> per-image cell-free reference -> absorbance -> pixelwise baseline -> CNR.
+-> per-image analyte-free reference -> absorbance -> pixelwise baseline -> CNR.
 
 All operations run locally. Mutations commit complete results under a lock and
 invalidate dependent stages. Raw files are never changed. This module reuses
@@ -43,6 +43,7 @@ os.environ.setdefault(
 import numpy as np
 import pandas as pd
 from scipy.ndimage import maximum_filter
+from scipy.signal import savgol_filter
 
 from qcl_analysis.absorbance import calculate_absorbance
 from qcl_analysis.baseline import correct_absorbance_baselines
@@ -105,10 +106,10 @@ def roi_from(payload):
 def select_cell_free_pixels(image, method, count, search_roi=None):
     """Return stable (y, x) coordinates for extreme positive finite pixels."""
     if method not in {"brightest", "darkest"}:
-        raise ValueError("Cell-free pixel method must be brightest or darkest.")
-    count = integer(count, "Cell-free pixel count")
+        raise ValueError("Analyte-free pixel method must be brightest or darkest.")
+    count = integer(count, "Analyte-free pixel count")
     if count < 1:
-        raise ValueError("Cell-free pixel count must be at least 1.")
+        raise ValueError("Analyte-free pixel count must be at least 1.")
     image = np.asarray(image, dtype=float)
     eligible = np.isfinite(image) & (image > 0)
     if search_roi is not None:
@@ -119,7 +120,7 @@ def select_cell_free_pixels(image, method, count, search_roi=None):
     valid_flat = np.flatnonzero(eligible.ravel())
     if count > valid_flat.size:
         raise ValueError(
-            f"Cell-free pixel count ({count}) exceeds the number of positive finite pixels ({valid_flat.size})."
+            f"Analyte-free pixel count ({count}) exceeds the number of positive finite pixels ({valid_flat.size})."
         )
     values = image.ravel()[valid_flat]
     order = np.argsort(-values if method == "brightest" else values, kind="stable")
@@ -313,6 +314,126 @@ class ProcessingState:
             points.append({"wavenumber": int(row.wavenumber), "raw_signal": float(array[y, x])})
         return {**common, "x": x, "y": y, "points": points,
                 "missing_wavenumbers": sorted(set(int(v) for v in self.dataset.wavenumber) - set(int(v) for v in rows.wavenumber))}
+
+    def raw_roi_spectrum(self, payload):
+        """Average two full-image ROIs across all measured bands of a pattern."""
+        self.require("discovered")
+        pattern = payload["pattern"]
+        rows = self.dataset[self.dataset.pattern == pattern].sort_values("wavenumber")
+        if rows.empty:
+            raise ValueError("Choose a discovered pattern.")
+        wn = integer(payload["wavenumber"], "Preview wavenumber")
+        if wn not in set(rows.wavenumber):
+            raise ValueError("Choose a wavenumber available in this pattern.")
+        rois = {name: roi_from(payload[name]) for name in ("analyte_roi", "background_roi")}
+        points, shape = [], None
+        for row in rows.itertuples(index=False):
+            image = load_qcl_csv(row.path)
+            if shape is not None and image.shape != shape:
+                raise ValueError(f"Image shape differs at {row.wavenumber} cm^-1; shared ROIs require matching image shapes.")
+            shape = image.shape
+            means = []
+            for roi in rois.values():
+                values = crop_image(image, roi, copy=False)
+                means.append(float(np.mean(values)) if np.isfinite(values).all() else None)
+            signal, background = means
+            valid = all(v is not None and np.isfinite(v) and v > 0 for v in means)
+            ratio = signal / background if valid else None
+            valid = valid and np.isfinite(ratio) and ratio > 0
+            points.append({"wavenumber": int(row.wavenumber), "I": signal,
+                           "I_bg": background, "ratio": ratio if valid else None,
+                           "absorbance": float(-np.log10(ratio)) if valid else None,
+                           "status": "valid" if valid else "Non-finite or non-positive ROI mean / ratio"})
+        return {"pattern": pattern, "wavenumber": wn,
+                **{name: asdict(roi) for name, roi in rois.items()},
+                "analyte_pixels": (rois["analyte_roi"].x_max-rois["analyte_roi"].x_min)*(rois["analyte_roi"].y_max-rois["analyte_roi"].y_min),
+                "background_pixels": (rois["background_roi"].x_max-rois["background_roi"].x_min)*(rois["background_roi"].y_max-rois["background_roi"].y_min),
+                "points": points,
+                "missing_wavenumbers": sorted(set(int(v) for v in self.dataset.wavenumber)-set(int(v) for v in rows.wavenumber))}
+
+    def smooth_roi_spectrum(self, payload):
+        """Smooth a uniformly sampled absorbance spectrum without altering raw data."""
+        window = integer(payload["window"], "SG window")
+        order = integer(payload["order"], "SG polynomial order")
+        x = np.asarray(payload["wavenumbers"], dtype=float)
+        y = np.asarray(payload["absorbance"], dtype=float)
+        if x.ndim != 1 or y.ndim != 1 or x.size != y.size:
+            raise ValueError("SG requires matching one-dimensional wavenumbers and absorbance.")
+        if window < 3 or window % 2 != 1 or window > y.size:
+            raise ValueError("SG window must be odd, at least 3, and no larger than the measured band count.")
+        if order < 0 or order >= window:
+            raise ValueError("SG polynomial order must be non-negative and smaller than the window.")
+        if not np.isfinite(x).all() or not np.isfinite(y).all():
+            raise ValueError("SG requires finite absorbance at every band; invalid bands cannot be smoothed.")
+        spacing = np.diff(x)
+        if not (spacing > 0).all() or not np.allclose(spacing, spacing[0], rtol=1e-7, atol=1e-9):
+            raise ValueError("SG requires evenly spaced measured wavenumbers; missing or uneven bands are not interpolated.")
+        return {"window": window, "order": order,
+                "absorbance_sg": savgol_filter(y, window, order, mode="interp").tolist()}
+
+    def filter_roi_spectrum(self, payload):
+        """Apply optional reflected-padding Fourier filtering, followed by optional SG."""
+        x = np.asarray(payload["wavenumbers"], dtype=float)
+        y = np.asarray(payload["absorbance"], dtype=float)
+        fourier = bool(payload.get("fourier_enabled", False))
+        sg = bool(payload.get("sg_enabled", False))
+        if x.ndim != 1 or y.ndim != 1 or x.size != y.size or y.size < 3:
+            raise ValueError("Filtering requires at least three matching spectral samples.")
+        if not np.isfinite(x).all() or not np.isfinite(y).all():
+            raise ValueError("Filtering requires finite absorbance at every band.")
+        spacing = np.diff(x)
+        if not (spacing > 0).all() or not np.allclose(spacing, spacing[0], rtol=1e-7, atol=1e-9):
+            raise ValueError("Filtering requires evenly spaced measured wavenumbers; missing bands are not interpolated.")
+        output = y.copy()
+        result = {"fourier_enabled": fourier, "sg_enabled": sg}
+        if fourier:
+            mode = payload.get("fourier_mode", "lowpass")
+            if mode not in {"lowpass", "notch", "combined"}:
+                raise ValueError("Choose lowpass, notch, or combined Fourier filtering.")
+            cutoff, centers, width, rejected = None, [], None, []
+            if mode in {"lowpass", "combined"}:
+                cutoff = float(payload.get("cutoff", 0.1))
+                if not np.isfinite(cutoff) or not 0 < cutoff <= 0.5:
+                    raise ValueError("Fourier cutoff must be greater than 0 and at most 0.5 cycles/band.")
+                rejected.append([cutoff, 0.5])
+            if mode in {"notch", "combined"}:
+                centers = np.asarray(payload.get("notch_centers", []), dtype=float)
+                width = float(payload.get("notch_width", 0.02))
+                if centers.ndim != 1 or not centers.size or not np.isfinite(centers).all() or not ((centers > 0) & (centers <= 0.5)).all():
+                    raise ValueError("Enter at least one notch frequency greater than 0 and at most 0.5 cycles/band.")
+                if not np.isfinite(width) or not 0 < width <= 1:
+                    raise ValueError("Notch full width must be greater than 0 and at most 1 cycle/band.")
+                centers = sorted(set(centers.tolist()))
+                rejected.extend([[max(0., c-width/2), min(0.5, c+width/2)] for c in centers])
+            pad = y.size - 1
+            padded = np.pad(y, pad, mode="reflect")
+            coefficients = np.fft.rfft(padded)
+            frequency = np.fft.rfftfreq(padded.size)
+            mask = np.ones(frequency.shape, dtype=bool)
+            if cutoff is not None:
+                mask &= frequency <= cutoff
+            for center in centers:
+                mask &= ~((np.abs(frequency-center) <= width/2) & (frequency > 0))
+            filtered = coefficients * mask
+            output = np.fft.irfft(filtered, n=padded.size)[pad:pad+y.size]
+            amplitude = np.abs(coefficients) / padded.size
+            result.update({"cutoff": cutoff, "padding": pad, "fourier_mode": mode,
+                           "notch_centers": centers, "notch_width": width,
+                           "rejected_ranges": rejected,
+                           "removed_bins": int(np.count_nonzero(~mask)),
+                           "absorbance_fourier": output.tolist(),
+                           "fourier_removed": (y-output).tolist(),
+                           "frequency": frequency.tolist(),
+                           "fft_before": amplitude.tolist(),
+                           "fft_after": (amplitude*mask).tolist(),
+                           "fft_removed": (amplitude*(~mask)).tolist(),
+                           "mask": mask.astype(int).tolist()})
+        if sg:
+            smoothed = self.smooth_roi_spectrum({**payload, "absorbance": output.tolist()})
+            result.update(smoothed)
+            output = np.asarray(smoothed["absorbance_sg"])
+        result["absorbance_filtered"] = output.tolist()
+        return result
 
     def configure(self, payload):
         self.require("discovered")
@@ -688,9 +809,9 @@ class ProcessingState:
         self.require("processed")
         method = payload.get("method", "roi")
         if method not in {"roi", "brightest", "darkest"}:
-            raise ValueError("Unknown cell-free reference method.")
+            raise ValueError("Unknown analyte-free reference method.")
         roi = roi_from(payload["roi"]) if method == "roi" else None
-        count = integer(payload.get("count", 1), "Cell-free pixel count") if method != "roi" else None
+        count = integer(payload.get("count", 1), "Analyte-free pixel count") if method != "roi" else None
         absorbance, baselines, records = {}, {}, []
         selections = {}
         reference_bands = {}
@@ -716,7 +837,7 @@ class ProcessingState:
                 reference = flat.corrected[pixels[:, 0], pixels[:, 1]]
             if not np.isfinite(reference).all() or (reference <= 0).any():
                 raise ValueError(
-                    f"Cell-free selection contains invalid reflectance at {key}. Select another reference."
+                    f"Analyte-free selection contains invalid reflectance at {key}. Select another reference."
                 )
             r0 = float(np.mean(reference))
             a = calculate_absorbance(flat.corrected, r0)
@@ -1042,7 +1163,7 @@ class ProcessingState:
             "drift_correction": self.drift,
             "cell_free_roi_local": asdict(self.r0_roi) if self.r0_roi else None,
             "cell_free_selection": self.r0_selection,
-            "roi_coordinates": "half-open pixel coordinates; cell-free and CNR ROIs local to on-MS crop",
+            "roi_coordinates": "half-open pixel coordinates; analyte-free and CNR ROIs local to on-MS crop",
             "processing": self.parameters,
             "qc_settings": self.qc_settings,
             "r0": self.r0_records,
@@ -1111,6 +1232,58 @@ class ProcessingState:
 STATE = ProcessingState()
 
 
+class ComparisonSession:
+    """Independent datasets, addressed explicitly; the original session is retained."""
+
+    def __init__(self):
+        self.lock = threading.RLock()
+        self.datasets = {"default": STATE}
+        self.names = {"default": "Single dataset"}
+
+    def get(self, dataset_id="default"):
+        with self.lock:
+            if dataset_id not in self.datasets:
+                raise ValueError("Unknown dataset. Import this folder again.")
+            return self.datasets[dataset_id]
+
+    def add(self, payload):
+        dataset = ProcessingState()
+        discovered = dataset.discover({"path": payload["path"]})
+        dataset_id = uuid.uuid4().hex
+        name = str(payload.get("name", "")).strip() or dataset.path.parent.name + "/" + dataset.path.name
+        with self.lock:
+            self.datasets[dataset_id] = dataset
+            self.names[dataset_id] = name
+        return {"id": dataset_id, "name": name, "path": str(dataset.path), "discovery": discovered}
+
+    def info(self, ids):
+        result = []
+        for dataset_id in ids:
+            dataset = self.get(dataset_id)
+            with dataset.lock:
+                result.append({"id": dataset_id, "name": self.names[dataset_id],
+                    **dataset.status(), "parameters": dataset.parameters,
+                    "n_pixels": getattr(dataset, "n_pixels", None),
+                    "qc_settings": getattr(dataset, "qc_settings", {}),
+                    "cnr": dataset.cnr_records, "cnr_rois": dataset.cnr_rois})
+        return result
+
+    def export(self, ids):
+        if len(set(ids)) < 2:
+            raise ValueError("Choose at least two datasets.")
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for index, dataset_id in enumerate(dict.fromkeys(ids), 1):
+                dataset = self.get(dataset_id)
+                with dataset.lock:
+                    archive.writestr(f"dataset_{index}/results.zip", dataset.export())
+            archive.writestr("datasets.json", json.dumps(clean_json(self.info(ids)), indent=2, allow_nan=False))
+        return output.getvalue()
+
+
+COMPARISON = ComparisonSession()
+
+
 class Handler(BaseHTTPRequestHandler):
     """Serve only explicit frontend assets and local processing API routes."""
 
@@ -1134,22 +1307,30 @@ class Handler(BaseHTTPRequestHandler):
             "/": ("index.html", "text/html; charset=utf-8"),
             "/app.js": ("app.js", "text/javascript; charset=utf-8"),
             "/styles.css": ("styles.css", "text/css; charset=utf-8"),
+            "/compare": ("compare.html", "text/html; charset=utf-8"),
+            "/compare.js": ("compare.js", "text/javascript; charset=utf-8"),
         }
         try:
             if url.path in assets:
                 name, mime = assets[url.path]
                 return self.send((STATIC / name).read_bytes(), mime)
+            query = {k: v[0] for k, v in parse_qs(url.query).items()}
+            if url.path == "/api/comparison-info":
+                return self.json(COMPARISON.info(query.get("ids", "").split(",")))
+            if url.path == "/api/comparison-export":
+                return self.send(COMPARISON.export(query.get("ids", "").split(",")), "application/zip")
+            session = COMPARISON.get(query.get("dataset", "default"))
             if url.path == "/api/process-progress":
-                return self.json(STATE.processing_progress())
-            with STATE.lock:
+                return self.json(session.processing_progress())
+            with session.lock:
                 if url.path == "/api/status":
-                    return self.json(STATE.status())
+                    return self.json(session.status())
                 if url.path == "/api/image":
                     return self.json(
-                        STATE.image({k: v[0] for k, v in parse_qs(url.query).items()})
+                        session.image({k: v[0] for k, v in parse_qs(url.query).items()})
                     )
                 if url.path == "/api/export":
-                    data = STATE.export()
+                    data = session.export()
                     self.send_response(200)
                     self.send_header("Content-Type", "application/zip")
                     self.send_header(
@@ -1174,31 +1355,38 @@ class Handler(BaseHTTPRequestHandler):
             if not 0 < length <= 1_000_000:
                 raise ValueError("Invalid request size.")
             payload = json.loads(self.rfile.read(length))
-            if self.path == "/api/export-video":
-                with STATE.lock:
-                    video = STATE.last_video
-                    if not video or video['video_id'] != payload.get('video_id') or video['version'] != STATE.version:
+            url = urlparse(self.path)
+            if url.path == "/api/datasets":
+                return self.json(COMPARISON.add(payload))
+            session = COMPARISON.get(parse_qs(url.query).get("dataset", ["default"])[0])
+            if url.path == "/api/export-video":
+                with session.lock:
+                    video = session.last_video
+                    if not video or video['video_id'] != payload.get('video_id') or video['version'] != session.version:
                         raise ValueError("Rebuild the current video before exporting.")
                 data = encode_video(video, float(payload['fps']), payload['labels'])
                 return self.send(data, "video/mp4")
             routes = {
-                "/api/discover": STATE.discover,
-                "/api/raw-inspection": STATE.raw_inspection,
-                "/api/configure": STATE.configure,
-                "/api/crop": STATE.crop,
-                "/api/crop-preview": STATE.crop_plan,
-                "/api/process": STATE.process,
-                "/api/preview": STATE.preview,
-                "/api/calculate": STATE.calculate,
-                "/api/baseline": STATE.correct_baseline,
-                "/api/cnr": STATE.cnr,
-                "/api/baseline-pixel": STATE.baseline_pixel,
-                "/api/timelapse": STATE.timelapse,
+                "/api/discover": session.discover,
+                "/api/raw-inspection": session.raw_inspection,
+                "/api/raw-roi-spectrum": session.raw_roi_spectrum,
+                "/api/roi-spectrum-sg": session.smooth_roi_spectrum,
+                "/api/roi-spectrum-filter": session.filter_roi_spectrum,
+                "/api/configure": session.configure,
+                "/api/crop": session.crop,
+                "/api/crop-preview": session.crop_plan,
+                "/api/process": session.process,
+                "/api/preview": session.preview,
+                "/api/calculate": session.calculate,
+                "/api/baseline": session.correct_baseline,
+                "/api/cnr": session.cnr,
+                "/api/baseline-pixel": session.baseline_pixel,
+                "/api/timelapse": session.timelapse,
             }
-            if self.path not in routes:
+            if url.path not in routes:
                 return self.json({"error": "Not found"}, 404)
-            with STATE.lock:
-                self.json(routes[self.path](payload))
+            with session.lock:
+                self.json(routes[url.path](payload))
         except (ValueError, KeyError, RuntimeError, OSError, TypeError) as exc:
             self.json({"error": str(exc)}, 400)
 

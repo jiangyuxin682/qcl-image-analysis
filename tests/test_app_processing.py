@@ -547,3 +547,163 @@ def test_raw_inspection_rejects_misaligned_shapes(acquisition):
     state.discover({'path': str(acquisition)})
     with pytest.raises(ValueError, match='shape'):
         state.raw_inspection({'pattern': 'pattern0', 'wavenumber': 1658, 'x': 0, 'y': 0})
+
+
+def test_multiple_folder_sessions_are_isolated(acquisition):
+    from ui.app_processing import ComparisonSession
+    session = ComparisonSession()
+    first = session.add({'path': str(acquisition), 'name': 'A'})
+    second = session.add({'path': str(acquisition), 'name': 'B'})
+    a, b = session.get(first['id']), session.get(second['id'])
+    assert a is not b
+    a.configure({'mapping': {'1658': [1601, 1702]}, 'patterns': ['pattern0'], 'n_pixels': 5})
+    assert b.stage == 'discovered' and not b.raw
+    with pytest.raises(ValueError, match='Unknown dataset'):
+        session.get('not-a-dataset')
+    session.datasets[first['id']] = complete(acquisition)
+    session.datasets[second['id']] = complete(acquisition)
+    ids = [first['id'], second['id']]
+    summary = session.info(ids)
+    assert [d['name'] for d in summary] == ['A', 'B']
+    assert all(d['stage'] == 'complete' for d in summary)
+    with zipfile.ZipFile(io.BytesIO(session.export(ids))) as archive:
+        assert set(archive.namelist()) == {'dataset_1/results.zip', 'dataset_2/results.zip', 'datasets.json'}
+        assert json.loads(archive.read('datasets.json'))[1]['name'] == 'B'
+
+
+def test_raw_roi_spectrum_means_and_invalid_bands(tmp_path):
+    folder = tmp_path / 'pattern0'
+    folder.mkdir()
+    for wn, signal in [(1700, [2., 6.]), (1600, [1., 3.]), (1800, [0., 0.])]:
+        np.savetxt(folder / f'lineScan_{wn}_0invcm.csv', [signal, [8., 8.]], delimiter=',')
+    state = ProcessingState()
+    state.discover({'path': str(folder)})
+    payload = {'pattern': 'pattern0', 'wavenumber': 1700,
+               'analyte_roi': {'x_min': 0, 'x_max': 2, 'y_min': 0, 'y_max': 1},
+               'background_roi': {'x_min': 0, 'x_max': 2, 'y_min': 1, 'y_max': 2}}
+    version = state.version
+    result = state.raw_roi_spectrum(payload)
+    assert result['analyte_pixels'] == result['background_pixels'] == 2
+    assert [p['wavenumber'] for p in result['points']] == [1600, 1700, 1800]
+    assert [p['I'] for p in result['points']] == [2., 4., 0.]
+    assert result['points'][0]['ratio'] == .25
+    assert result['points'][1]['absorbance'] == pytest.approx(-np.log10(.5))
+    assert result['points'][2]['absorbance'] is None
+    assert result['points'][2]['status'] != 'valid'
+    assert state.version == version and state.stage == 'discovered'
+    assert state.r0_roi is None and not state.raw
+    json.dumps(clean_json(result), allow_nan=False)
+    with pytest.raises(ValueError, match='exceeds'):
+        state.raw_roi_spectrum({**payload, 'analyte_roi': {**payload['analyte_roi'], 'x_max': 3}})
+    np.savetxt(folder / 'lineScan_1800_0invcm.csv', np.ones((3, 3)), delimiter=',')
+    with pytest.raises(ValueError, match='shape'):
+        state.raw_roi_spectrum(payload)
+
+
+def test_raw_roi_spectrum_all_bands_and_missing(acquisition):
+    (acquisition / 'stacks/pattern1/lineScan_1080_0invcm.csv').unlink()
+    state = ProcessingState()
+    state.discover({'path': str(acquisition)})
+    result = state.raw_roi_spectrum({'pattern': 'pattern1', 'wavenumber': 1658,
+        'analyte_roi': {'x_min': 1, 'x_max': 4, 'y_min': 2, 'y_max': 5},
+        'background_roi': {'x_min': 5, 'x_max': 9, 'y_min': 1, 'y_max': 3}})
+    assert result['missing_wavenumbers'] == [1080]
+    for p in result['points']:
+        raw = np.loadtxt(acquisition / 'stacks/pattern1' / f"lineScan_{p['wavenumber']}_0invcm.csv", delimiter=',')
+        assert p['I'] == pytest.approx(raw[2:5, 1:4].mean())
+        assert p['I_bg'] == pytest.approx(raw[1:3, 5:9].mean())
+
+
+def test_roi_sg_preserves_polynomial_and_reduces_noise():
+    state = ProcessingState()
+    x = np.arange(1600., 1641.)
+    baseline = .1 + .002 * (x - 1620) + .0001 * (x - 1620) ** 2
+    payload = {'wavenumbers': x.tolist(), 'absorbance': baseline.tolist(), 'window': 11, 'order': 2}
+    result = state.smooth_roi_spectrum(payload)
+    np.testing.assert_allclose(result['absorbance_sg'], baseline, atol=1e-12)
+    noisy = baseline + .01 * (-1.) ** np.arange(x.size)
+    result = state.smooth_roi_spectrum({**payload, 'absorbance': noisy.tolist()})
+    assert np.std(np.array(result['absorbance_sg']) - baseline) < np.std(noisy - baseline)
+    assert payload['absorbance'] == baseline.tolist()
+
+
+@pytest.mark.parametrize('override', [
+    {'window': 4}, {'window': 9}, {'window': 3.5}, {'order': 5}, {'order': -1},
+    {'absorbance': [1, 2, None, 4, 5]}, {'wavenumbers': [1, 2, 4, 5, 6]},
+    {'wavenumbers': [1, 2, 2, 3, 4]}, {'absorbance': [1, 2]},
+])
+def test_roi_sg_rejects_invalid_parameters_or_sampling(override):
+    payload = {'wavenumbers': [1, 2, 3, 4, 5], 'absorbance': [1, 2, 3, 4, 5], 'window': 5, 'order': 2}
+    with pytest.raises(ValueError):
+        ProcessingState().smooth_roi_spectrum({**payload, **override})
+
+
+@pytest.mark.parametrize('fourier,sg', [(False, False), (True, False), (False, True), (True, True)])
+def test_roi_spectral_filters_combine_independently(fourier, sg):
+    state = ProcessingState()
+    x = np.arange(129.)
+    clean = .2 + .1 * np.cos(2 * np.pi * x / 128)
+    signal = clean + .02 * np.cos(2 * np.pi * 40 * x / 128)
+    payload = {'wavenumbers': (x + 1600).tolist(), 'absorbance': signal.tolist(),
+               'fourier_enabled': fourier, 'sg_enabled': sg, 'cutoff': .1,
+               'window': 11, 'order': 2}
+    result = state.filter_roi_spectrum(payload)
+    output = np.array(result['absorbance_filtered'])
+    if not fourier and not sg:
+        np.testing.assert_array_equal(output, signal)
+    else:
+        assert np.std(output-clean) < np.std(signal-clean)
+    if fourier:
+        np.testing.assert_allclose(np.array(result['absorbance_fourier']) + result['fourier_removed'], signal)
+        frequency = np.array(result['frequency'])
+        assert np.all(np.array(result['fft_after'])[frequency > .1] == 0)
+        np.testing.assert_allclose(np.array(result['fft_after']) + result['fft_removed'], result['fft_before'])
+    if sg:
+        expected = state.smooth_roi_spectrum({**payload, 'absorbance': result.get('absorbance_fourier', signal.tolist())})
+        np.testing.assert_allclose(output, expected['absorbance_sg'])
+    assert payload['absorbance'] == signal.tolist()
+
+
+def test_roi_fourier_nyquist_preserves_signal():
+    signal = np.random.default_rng(0).normal(size=31)
+    result = ProcessingState().filter_roi_spectrum({'wavenumbers': list(range(31)),
+        'absorbance': signal.tolist(), 'fourier_enabled': True, 'cutoff': .5})
+    np.testing.assert_allclose(result['absorbance_filtered'], signal, atol=1e-14)
+
+
+@pytest.mark.parametrize('override', [{'cutoff': 0}, {'cutoff': .6}, {'cutoff': float('nan')},
+    {'absorbance': [1, None, 3]}, {'wavenumbers': [1, 2, 4]}])
+def test_roi_fourier_rejects_invalid_input(override):
+    with pytest.raises(ValueError):
+        ProcessingState().filter_roi_spectrum({'wavenumbers': [1, 2, 3], 'absorbance': [1, 2, 3],
+            'fourier_enabled': True, 'cutoff': .1, **override})
+
+
+@pytest.mark.parametrize('mode', ['notch', 'combined'])
+def test_roi_notch_removes_only_selected_frequency_ranges(mode):
+    x = np.arange(129.)
+    signal = .2 + .1*np.cos(2*np.pi*x/128) + .02*np.cos(2*np.pi*32*x/128)
+    result = ProcessingState().filter_roi_spectrum({'wavenumbers': x.tolist(),
+        'absorbance': signal.tolist(), 'fourier_enabled': True, 'fourier_mode': mode,
+        'cutoff': .4, 'notch_centers': [.25, .35], 'notch_width': .04,
+        'sg_enabled': True, 'window': 11, 'order': 2})
+    frequency = np.array(result['frequency'])
+    rejected = (np.abs(frequency-.25) <= .02) | (np.abs(frequency-.35) <= .02)
+    if mode == 'combined':
+        rejected |= frequency > .4
+    np.testing.assert_array_equal(result['mask'], (~rejected).astype(int))
+    assert result['fft_after'][0] == result['fft_before'][0]
+    assert np.all(np.array(result['fft_after'])[rejected] == 0)
+    np.testing.assert_allclose(np.array(result['absorbance_fourier'])+result['fourier_removed'], signal)
+    assert np.std(np.array(result['absorbance_fourier'])-(.2+.1*np.cos(2*np.pi*x/128))) < .01
+    assert result['sg_enabled']
+
+
+@pytest.mark.parametrize('override', [{'notch_centers': []}, {'notch_centers': [0]},
+    {'notch_centers': [.6]}, {'notch_centers': [float('nan')]}, {'notch_width': 0},
+    {'notch_width': -1}, {'fourier_mode': 'unknown'}])
+def test_roi_notch_rejects_invalid_settings(override):
+    with pytest.raises(ValueError):
+        ProcessingState().filter_roi_spectrum({'wavenumbers': list(range(9)),
+            'absorbance': [1]*9, 'fourier_enabled': True, 'fourier_mode': 'notch',
+            'notch_centers': [.25], 'notch_width': .02, **override})
