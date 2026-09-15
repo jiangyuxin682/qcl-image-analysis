@@ -25,7 +25,14 @@ def encode_video(video, fps, labels):
         executable = '/opt/homebrew/bin/ffmpeg'
     if not executable:
         raise ValueError("MP4 export requires FFmpeg. Install FFmpeg and restart the app.")
-    stage = 'Absorbance after baseline' if video['kind']=='baseline' else 'Absorbance before baseline'
+    stage = {
+        "raw": "Raw intensity",
+        "reflectance": "Reflectance before processing",
+        "fourier": "Reflectance after Fourier",
+        "rolling": "Reflectance after rolling ball",
+        "absorbance": "Absorbance before baseline",
+        "baseline": "Absorbance after baseline",
+    }[video["kind"]]
     title = f"{video['wavenumber']} cm⁻¹ · {stage} · Contrast: {video['low']:g}–{video['high']:g} percentiles · FPS: {fps:g}"
     font_path = font_manager.findfont('DejaVu Sans')
     font = ImageFont.truetype(font_path, 20)

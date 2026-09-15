@@ -198,3 +198,33 @@ def test_invalid_elliptical_axis_width(axis, value):
 
     with pytest.raises(ValueError):
         apply_fourier_lowpass_filter(np.ones((8, 9)), **{axis: value})
+
+
+def test_anisotropic_notch_axis_widths_and_compatibility():
+    shape = (100, 100)
+    kwargs = {"strength": 1., "protect_radius": 0.}
+    mask = gaussian_notch_mask(shape, [(0, .25)], sigma_x=.04, sigma_y=.01, **kwargs)
+    # Equal frequency offsets have different attenuation along X and Y.
+    assert mask[50, 76] == pytest.approx(1 - np.exp(-.5 * (.01/.04)**2))
+    assert mask[51, 75] == pytest.approx(1 - np.exp(-.5 * (.01/.01)**2))
+    unshifted = np.fft.ifftshift(mask)
+    np.testing.assert_allclose(unshifted, unshifted[np.ix_((-np.arange(100)) % 100, (-np.arange(100)) % 100)], atol=1e-14)
+    old = gaussian_notch_mask(shape, [(0, .25)], sigma=.02)
+    new = gaussian_notch_mask(shape, [(0, .25)], sigma_x=.02, sigma_y=.02)
+    np.testing.assert_array_equal(old, new)
+
+
+@pytest.mark.parametrize('axis', ['sigma_x', 'sigma_y'])
+@pytest.mark.parametrize('value', [0, -1, np.nan, np.inf])
+def test_invalid_notch_axis_width(axis, value):
+    with pytest.raises(ValueError, match=axis):
+        gaussian_notch_mask((10, 10), [(0, .3)], **{axis: value})
+
+
+def test_combined_filter_preserves_anisotropic_notch_mask():
+    from qcl_analysis.fourier import apply_fourier_combined_filter, gaussian_lowpass_mask
+    image = np.random.default_rng(42).normal(size=(20, 30))
+    result = apply_fourier_combined_filter(image, [(0, .25)], sigma_x=.05, sigma_y=.01, pad_pixels=3)
+    expected = gaussian_notch_mask((26, 36), [(0, .25)], sigma_x=.05, sigma_y=.01) * gaussian_lowpass_mask((26, 36), cutoff_x=.15, cutoff_y=.15)
+    np.testing.assert_allclose(result.mask, expected)
+    np.testing.assert_allclose(result.filtered + result.removed, image)

@@ -52,6 +52,7 @@ from qcl_analysis.drift import gold_drift_rois
 from qcl_analysis.flat_field import FlatFieldResult, rolling_ball_flat_field
 from qcl_analysis.fourier import (
     FourierFilterResult,
+    apply_fourier_combined_filter,
     apply_fourier_lowpass_filter,
     apply_fourier_notch_filter,
     fourier_spectrum,
@@ -101,7 +102,7 @@ def roi_from(payload):
     )
 
 
-def select_cell_free_pixels(image, method, count):
+def select_cell_free_pixels(image, method, count, search_roi=None):
     """Return stable (y, x) coordinates for extreme positive finite pixels."""
     if method not in {"brightest", "darkest"}:
         raise ValueError("Cell-free pixel method must be brightest or darkest.")
@@ -109,7 +110,13 @@ def select_cell_free_pixels(image, method, count):
     if count < 1:
         raise ValueError("Cell-free pixel count must be at least 1.")
     image = np.asarray(image, dtype=float)
-    valid_flat = np.flatnonzero(np.isfinite(image.ravel()) & (image.ravel() > 0))
+    eligible = np.isfinite(image) & (image > 0)
+    if search_roi is not None:
+        crop_image(image, search_roi, copy=False)
+        inside = np.zeros(image.shape, dtype=bool)
+        inside[search_roi.as_slices()] = True
+        eligible &= inside
+    valid_flat = np.flatnonzero(eligible.ravel())
     if count > valid_flat.size:
         raise ValueError(
             f"Cell-free pixel count ({count}) exceeds the number of positive finite pixels ({valid_flat.size})."
@@ -127,6 +134,11 @@ def discover_files(path):
     stacks child is also accepted. Only the documented lineScan name is parsed;
     metadata CSVs are ignored. Duplicate (pattern, band) pairs are errors.
     """
+    path = str(path).strip()
+    while len(path) >= 2 and path[0] == path[-1] and path[0] in "\"'":
+        path = path[1:-1].strip()
+    if not path:
+        raise ValueError("Choose a data path.")
     source = Path(path).expanduser().resolve()
     if source.is_file():
         if not FILE_RE.fullmatch(source.name):
@@ -237,6 +249,7 @@ class ProcessingState:
             "configured",
             "cropped",
             "processed",
+            "absorbed",
             "complete",
         ]
         if order.index(self.stage) < order.index(stage):
@@ -270,6 +283,36 @@ class ProcessingState:
                 for p, g in dataset.groupby("pattern", sort=False)
             ],
         }
+
+    def raw_inspection(self, payload):
+        """Read full-image raw spectra before selecting processing bands or ROIs."""
+        self.require("discovered")
+        pattern = payload["pattern"]
+        rows = self.dataset[self.dataset.pattern == pattern].sort_values("wavenumber")
+        if rows.empty:
+            raise ValueError("Choose a discovered pattern.")
+        wn = integer(payload["wavenumber"], "Preview wavenumber")
+        selected = rows[rows.wavenumber == wn]
+        if selected.empty:
+            raise ValueError("Choose a wavenumber available in this pattern.")
+        image = load_qcl_csv(selected.iloc[0].path)
+        height, width = image.shape
+        common = {"pattern": pattern, "wavenumber": wn, "width": width,
+                  "height": height, "version": self.version}
+        if payload.get("mode") == "image":
+            png, lo, hi = render_data_png(image)
+            return {**common, "png": base64.b64encode(png).decode(), "vmin": lo, "vmax": hi}
+        x, y = integer(payload["x"], "Pixel x"), integer(payload["y"], "Pixel y")
+        if not (0 <= x < width and 0 <= y < height):
+            raise ValueError("Pixel coordinates must be inside the full image.")
+        points = []
+        for row in rows.itertuples(index=False):
+            array = image if row.wavenumber == wn else load_qcl_csv(row.path)
+            if array.shape != image.shape:
+                raise ValueError(f"Image shape differs at {row.wavenumber} cm^-1; a shared pixel spectrum requires matching image shapes.")
+            points.append({"wavenumber": int(row.wavenumber), "raw_signal": float(array[y, x])})
+        return {**common, "x": x, "y": y, "points": points,
+                "missing_wavenumbers": sorted(set(int(v) for v in self.dataset.wavenumber) - set(int(v) for v in rows.wavenumber))}
 
     def configure(self, payload):
         self.require("discovered")
@@ -389,6 +432,8 @@ class ProcessingState:
             "mode",
             "centers",
             "sigma",
+            "sigma_x",
+            "sigma_y",
             "strength",
             "protect_radius",
             "cutoff_x",
@@ -408,8 +453,8 @@ class ProcessingState:
         }
         if set(f) - allowed_f or set(r) - allowed_r:
             raise ValueError("Unknown processing parameter.")
-        if mode not in {"notch", "lowpass", "none"}:
-            raise ValueError("Choose notch, lowpass or none.")
+        if mode not in {"notch", "lowpass", "combined", "none"}:
+            raise ValueError("Choose notch, lowpass, combined or none.")
         shared = {
             "pad_pixels": integer(f.get("pad_pixels", 0), "Fourier padding"),
             "preserve_mean": bool(f.get("preserve_mean", True)),
@@ -425,6 +470,16 @@ class ProcessingState:
                 fy,
                 fx,
             )
+        elif mode == "combined":
+            output = apply_fourier_combined_filter(
+                image, f.get("centers", []),
+                sigma=float(f.get("sigma", 0.01)),
+                sigma_x=float(f.get("sigma_x", f.get("sigma", 0.01))),
+                sigma_y=float(f.get("sigma_y", f.get("sigma", 0.01))),
+                strength=float(f.get("strength", 0.9)),
+                protect_radius=float(f.get("protect_radius", 0.02)),
+                cutoff_x=float(f.get("cutoff_x", 0.15)),
+                cutoff_y=float(f.get("cutoff_y", 0.15)), **shared)
         elif mode == "lowpass":
             output = apply_fourier_lowpass_filter(
                 image,
@@ -437,6 +492,8 @@ class ProcessingState:
                 image,
                 f.get("centers", []) if mode == "notch" else [],
                 sigma=float(f.get("sigma", 0.01)),
+                sigma_x=float(f.get("sigma_x", f.get("sigma", 0.01))),
+                sigma_y=float(f.get("sigma_y", f.get("sigma", 0.01))),
                 strength=float(f.get("strength", 0.9)),
                 protect_radius=float(f.get("protect_radius", 0.02)),
                 **shared,
@@ -539,6 +596,13 @@ class ProcessingState:
             fft_limits,
             "log(1 + FFT amplitude). Same scale as the input FFT. " + axes,
         )
+        removed_bound = max(float(np.max(np.abs(output.removed))), 1e-12)
+        diagnostic(
+            "Signal removed by Fourier: input − filtered",
+            output.removed,
+            (-removed_bound, removed_bound),
+            "Signed reflectance removed by the current Fourier filter. Updates when notches or widths change; combined mode includes low-pass removal. May include specimen detail.",
+        )
         enabled = bool(payload["rolling"].get("enabled", True))
         diagnostic(
             "Estimated rolling-ball background",
@@ -631,6 +695,7 @@ class ProcessingState:
         selections = {}
         reference_bands = {}
         pattern_pixels = {}
+        search_roi = roi_from(payload["search_roi"]) if payload.get("search_roi") else None
         if method != "roi":
             requested = payload.get("reference_bands", {})
             for pattern in self.patterns:
@@ -639,7 +704,7 @@ class ProcessingState:
                     raise ValueError(f"Choose a processed reference wavenumber for {pattern}.")
                 reference_bands[pattern] = wn
                 pattern_pixels[pattern] = select_cell_free_pixels(
-                    self.flat[(pattern, wn)].corrected, method, count
+                    self.flat[(pattern, wn)].corrected, method, count, search_roi
                 )
         for key, flat in self.flat.items():
             if method == "roi":
@@ -670,27 +735,72 @@ class ProcessingState:
                     ),
                 }
             )
-        for pattern in self.patterns:
-            results = correct_absorbance_baselines(
-                {wn: absorbance[(pattern, wn)] for wn in self.bands}, self.mapping
-            )
-            baselines.update(
-                {(pattern, int(wn)): result for wn, result in results.items()}
-            )
         self.r0_roi, self.r0_selection, self.r0_pixels = (
             roi,
             {"method": method, **({"count": count, "reference_bands": reference_bands} if count is not None else {})},
             selections,
         )
+        if search_roi is not None and method != "roi":
+            self.r0_selection["search_roi"] = asdict(search_roi)
         self.absorbance, self.baselines, self.r0_records = (
             absorbance,
             baselines,
             records,
         )
         self.cnr_records, self.cnr_rois = [], None
-        self.stage = "complete"
+        self.stage = "absorbed"
         self.version += 1
         return {**self.status(), "r0": records}
+
+    def correct_baseline(self, payload):
+        """Commit baseline correction separately from absorbance calculation."""
+        self.require("absorbed")
+        baselines = {}
+        for pattern in self.patterns:
+            results = correct_absorbance_baselines(
+                {wn: self.absorbance[(pattern, wn)] for wn in self.bands}, self.mapping
+            )
+            baselines.update(
+                {(pattern, int(wn)): result for wn, result in results.items()}
+            )
+        self.baselines = baselines
+        self.cnr_records, self.cnr_rois = [], None
+        self.stage = "complete"
+        self.version += 1
+        return self.status()
+
+    def baseline_pixel(self, payload):
+        """Inspect the committed baseline fit at a crop-local pixel."""
+        self.require("complete")
+        pattern = payload["pattern"]
+        center = integer(payload["wavenumber"], "Center wavenumber")
+        key = (pattern, center)
+        if key not in self.baselines:
+            raise ValueError("Choose a processed pattern and configured center wavenumber.")
+        x, y = integer(payload["x"], "Pixel x"), integer(payload["y"], "Pixel y")
+        result = self.baselines[key]
+        height, width = result.corrected.shape
+        if not (0 <= x < width and 0 <= y < height):
+            raise ValueError("Pixel coordinates must be inside the on-MS crop.")
+        refs = self.mapping[center]
+        slope = float(result.slope[y, x])
+        baseline = float(result.baseline[y, x])
+        points = [
+            {"wavenumber": wn, "absorbance": float(self.absorbance[(pattern, wn)][y, x]),
+             "fitted": baseline + slope * (wn - center)}
+            for wn in refs
+        ]
+        valid = bool(result.valid_mask[y, x])
+        return {
+            "pattern": pattern, "wavenumber": center, "x": x, "y": y,
+            "version": self.version, "references": points,
+            "slope": slope, "baseline": baseline,
+            "before": float(self.absorbance[key][y, x]),
+            "after": float(result.corrected[y, x]), "valid": valid,
+            "method": "Two-reference linear interpolation" if len(refs) == 2
+                      else "Unweighted linear least-squares fit",
+            "status": "Valid" if valid else "Invalid center or reference absorbance; no corrected value is available.",
+        }
 
     def stage_arrays(self, key):
         self.require("cropped")
@@ -814,7 +924,8 @@ class ProcessingState:
                 raise ValueError("Choose a processed reference wavenumber.")
             pixels = select_cell_free_pixels(
                 self.flat[(key[0], wn)].corrected,
-                payload["r0_method"], payload.get("r0_count", 1)
+                payload["r0_method"], payload.get("r0_count", 1),
+                roi_from(json.loads(payload["r0_search_roi"])) if payload.get("r0_search_roi") else None
             )
             extra["reference_wavenumber"] = wn
             reference = array[pixels[:, 0], pixels[:, 1]]
@@ -848,8 +959,8 @@ class ProcessingState:
         self.require("complete")
         wn = integer(payload["wavenumber"], "Wavenumber")
         kind = payload.get("kind", "baseline")
-        if kind not in {"absorbance", "baseline"}:
-            raise ValueError("Timelapse stage must be absorbance or baseline.")
+        if kind not in STAGES:
+            raise ValueError("Unknown timelapse stage.")
         start, end = int(payload.get("start", 0)), int(payload.get("end", 10**12))
         if start > end:
             raise ValueError("Start pattern must not exceed end pattern.")
@@ -895,9 +1006,9 @@ class ProcessingState:
             maximum = max(row[2] for row in extrema)
             min_patterns = ', '.join(row[0] for row in extrema if row[1] == minimum)
             max_patterns = ', '.join(row[0] for row in extrema if row[2] == maximum)
-            extrema_label = f"Data extrema · Max absorbance {maximum:.4f}: {max_patterns} · Min absorbance {minimum:.4f}: {min_patterns}"
+            extrema_label = f"Data extrema · Max value {maximum:.4f}: {max_patterns} · Min value {minimum:.4f}: {min_patterns}"
         else:
-            extrema_label = "Data extrema: no finite absorbance values"
+            extrema_label = "Data extrema: no finite values"
         self.last_video = {
             "extrema_label": extrema_label,
             "video_id": uuid.uuid4().hex,
@@ -1072,13 +1183,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(data, "video/mp4")
             routes = {
                 "/api/discover": STATE.discover,
+                "/api/raw-inspection": STATE.raw_inspection,
                 "/api/configure": STATE.configure,
                 "/api/crop": STATE.crop,
                 "/api/crop-preview": STATE.crop_plan,
                 "/api/process": STATE.process,
                 "/api/preview": STATE.preview,
                 "/api/calculate": STATE.calculate,
+                "/api/baseline": STATE.correct_baseline,
                 "/api/cnr": STATE.cnr,
+                "/api/baseline-pixel": STATE.baseline_pixel,
                 "/api/timelapse": STATE.timelapse,
             }
             if self.path not in routes:

@@ -52,7 +52,7 @@ def test_live_diagnostics_follow_actual_filter_and_background(acquisition):
     }
     preview = state.preview(payload)
     diagnostics = preview["diagnostics"]
-    assert len(diagnostics) == 6
+    assert len(diagnostics) == 7
     assert diagnostics[0]["vmax"] == diagnostics[2]["vmax"]
     assert (diagnostics[1]["vmin"], diagnostics[1]["vmax"]) == (0.0, 1.0)
     output, flat = state.process_image(state.crops[("pattern0", 1658)], payload)
@@ -60,6 +60,7 @@ def test_live_diagnostics_follow_actual_filter_and_background(acquisition):
         np.log1p(abs(output.spectrum_before)),
         output.mask,
         np.log1p(abs(output.spectrum_after)),
+        output.removed,
         flat.background,
         flat.gain,
         output.filtered - flat.corrected,
@@ -73,12 +74,12 @@ def test_live_diagnostics_follow_actual_filter_and_background(acquisition):
     assert updated[2]["png"] != diagnostics[2]["png"]
     payload["rolling"]["radius"] = 7
     changed = state.preview(payload)["diagnostics"]
-    assert changed[3]["png"] != updated[3]["png"]
+    assert changed[4]["png"] != updated[4]["png"]
     payload["rolling"]["enabled"] = False
     payload["fourier"]["enabled"] = False
     bypass = state.preview(payload)["diagnostics"]
     assert bypass[0]["png"] == bypass[2]["png"]
-    assert not bypass[3]["available"] and not bypass[4]["available"]
+    assert not bypass[4]["available"] and not bypass[5]["available"]
     assert state.stage == "cropped" and not state.ff
 
 
@@ -122,6 +123,7 @@ def test_preview_matches_batch_and_does_not_mutate(
             )
             assert np.all(state.flat[key].gain == 1)
     state.calculate({"roi": {"x_min": 0, "x_max": 3, "y_min": 0, "y_max": 3}})
+    state.correct_baseline({})
     assert state.stage == "complete"
 
 
@@ -201,6 +203,7 @@ def complete(path):
         }
     )
     state.calculate({"roi": {"x_min": 0, "x_max": 3, "y_min": 0, "y_max": 3}})
+    state.correct_baseline({})
     return state
 
 
@@ -316,6 +319,7 @@ def test_per_image_extreme_pixels_drive_r0_preview_and_export(acquisition, metho
     for i, flat in enumerate(state.flat.values()):
         flat.corrected[:] = np.roll(np.arange(flat.corrected.size).reshape(flat.corrected.shape) + 1.0, i * 13)
     result = state.calculate({"method": method, "count": count, "reference_bands": reference_bands})
+    state.correct_baseline({})
     assert result["r0_selection"] == {"method": method, "count": count, "reference_bands": reference_bands}
     assert state.r0_roi is None
     assert len(state.r0_pixels) == 6
@@ -380,3 +384,166 @@ def test_timelapse_contrast_and_identity(acquisition):
     assert adjusted["frames"][0]["png"] != default["frames"][0]["png"]
     with pytest.raises(ValueError, match="Contrast"):
         state.timelapse({"wavenumber": 1658, "low": 90, "high": 10})
+
+
+@pytest.mark.parametrize("quote", ['"', "'"])
+def test_discovery_accepts_quoted_paths(acquisition, quote):
+    source, data = discover_files(f"  {quote}{acquisition}{quote}  ")
+    assert source == acquisition / "stacks"
+    assert len(data) == 8
+
+
+@pytest.mark.parametrize("path", ["", "  ", '\"\"', "''"])
+def test_discovery_rejects_empty_paths(path):
+    with pytest.raises(ValueError, match="data path"):
+        discover_files(path)
+
+
+@pytest.mark.parametrize("kind", ["raw", "reflectance", "fourier", "rolling", "absorbance", "baseline"])
+def test_timelapse_uses_selected_stage(acquisition, kind):
+    state = complete(acquisition)
+    # Non-baseline stages must also support reference bands.
+    wn = 1658 if kind == "baseline" else 1601
+    result = state.timelapse({"wavenumber": wn, "kind": kind, "low": 10, "high": 90})
+    arrays = [state.stage_arrays((p, wn))[kind] for p in state.patterns]
+    limits = state.limits(arrays, 10, 90)
+    assert (result["vmin"], result["vmax"]) == limits
+    assert result["kind"] == kind
+    assert len(result["frames"]) == len(arrays)
+    from ui.app import render_data_png
+    import base64
+    for frame, array in zip(result["frames"], arrays):
+        expected, _, _ = render_data_png(array, limits=limits)
+        assert base64.b64decode(frame["png"]) == expected
+    assert "absorbance" not in result["extrema_label"]
+
+
+@pytest.mark.parametrize("references", [[1601, 1702], [1080, 1601, 1702]])
+def test_baseline_pixel_reports_committed_fit(acquisition, references):
+    from qcl_analysis.baseline import correct_absorbance_baselines
+    state = complete(acquisition)
+    # An unequal-spaced fit with a known slope and a center-only peak.
+    state.mapping = {1658: references}
+    for wn in [1658, *references]:
+        state.absorbance[('pattern0', wn)] = np.full((14, 16), .2 + .001 * (wn - 1658) + (.07 if wn == 1658 else 0))
+    results = correct_absorbance_baselines(
+        {wn: state.absorbance[('pattern0', wn)] for wn in [1658, *references]}, state.mapping
+    )
+    state.baselines[('pattern0', 1658)] = results[1658]
+    d = state.baseline_pixel({'pattern': 'pattern0', 'wavenumber': 1658, 'x': 4, 'y': 3})
+    assert d['valid']
+    assert d['before'] == pytest.approx(.27)
+    assert d['baseline'] == pytest.approx(.2)
+    assert d['after'] == pytest.approx(.07)
+    assert d['slope'] == pytest.approx(.001)
+    assert [r['wavenumber'] for r in d['references']] == references
+    for r in d['references']:
+        assert r['fitted'] == pytest.approx(r['absorbance'])
+
+
+@pytest.mark.parametrize('changes', [{'x': -1}, {'x': 16}, {'y': 14}, {'y': .5}, {'wavenumber': 1601}, {'pattern': 'missing'}])
+def test_baseline_pixel_validates_selection(acquisition, changes):
+    state = complete(acquisition)
+    with pytest.raises(ValueError):
+        state.baseline_pixel({'pattern': 'pattern0', 'wavenumber': 1658, 'x': 0, 'y': 0, **changes})
+
+
+def test_baseline_pixel_invalid_values_are_json_null(acquisition):
+    from qcl_analysis.baseline import correct_absorbance_baselines
+    state = complete(acquisition)
+    state.absorbance[('pattern0', 1601)][2, 3] = np.nan
+    state.baselines[('pattern0', 1658)] = correct_absorbance_baselines(
+        {wn: state.absorbance[('pattern0', wn)] for wn in state.bands}, state.mapping
+    )[1658]
+    d = clean_json(state.baseline_pixel({'pattern': 'pattern0', 'wavenumber': 1658, 'x': 3, 'y': 2}))
+    assert not d['valid']
+    assert d['baseline'] is None and d['after'] is None
+    assert d['references'][0]['absorbance'] is None
+
+
+def test_absorbance_and_baseline_are_separate_stages(acquisition):
+    state = complete(acquisition)
+    state.calculate({'roi': {'x_min': 0, 'x_max': 3, 'y_min': 0, 'y_max': 3}})
+    assert state.stage == 'absorbed'
+    assert state.absorbance and not state.baselines
+    assert state.image({'pattern': 'pattern0', 'wavenumber': 1658, 'kind': 'absorbance'})['available']
+    assert not state.image({'pattern': 'pattern0', 'wavenumber': 1658, 'kind': 'baseline'})['available']
+    with pytest.raises(ValueError, match='complete'):
+        state.baseline_pixel({'pattern': 'pattern0', 'wavenumber': 1658, 'x': 0, 'y': 0})
+    original = state.absorbance[('pattern0', 1658)].copy()
+    state.correct_baseline({})
+    assert state.stage == 'complete' and state.baselines
+    np.testing.assert_array_equal(state.absorbance[('pattern0', 1658)], original)
+    result = state.cnr({'background': {'x_min': 0, 'x_max': 3, 'y_min': 0, 'y_max': 3},
+                        'target': {'x_min': 6, 'x_max': 10, 'y_min': 6, 'y_max': 10}})
+    row = result['records'][0]
+    assert row['cnr'] == pytest.approx(abs(row['target_mean'] - row['background_mean']) / row['background_std'])
+    assert 'snr' not in row
+    with zipfile.ZipFile(io.BytesIO(state.export())) as archive:
+        assert 'snr' not in archive.read('cnr_summary.csv').decode().splitlines()[0]
+        assert 'snr_formula' not in json.loads(archive.read('metadata.json'))
+    state.calculate({'roi': {'x_min': 0, 'x_max': 2, 'y_min': 0, 'y_max': 2}})
+    assert not state.baselines and not state.cnr_records
+
+
+def test_anisotropic_notch_preview_removed_signal_matches_batch(acquisition):
+    state = configured(acquisition)
+    state.crop({"roi": {"x_min": 0, "x_max": 20, "y_min": 0, "y_max": 16}})
+    payload = {"pattern": "pattern0", "wavenumber": 1658,
+               "fourier": {"mode": "notch", "centers": [[0, .3]], "sigma_x": .04, "sigma_y": .015},
+               "rolling": {"enabled": False}}
+    preview = state.preview(payload)
+    output, _ = state.process_image(state.crops[("pattern0", 1658)], payload)
+    card = preview["diagnostics"][3]
+    expected, _, _ = render_data_png(output.removed, limits=(card["vmin"], card["vmax"]))
+    assert base64.b64decode(card["png"]) == expected
+    assert card["vmin"] == -card["vmax"]
+    assert state.stage == "cropped" and not state.ff
+    state.process(payload)
+    np.testing.assert_allclose(state.ff[("pattern0", 1658)].removed, output.removed)
+    assert state.parameters['fourier']['sigma_x'] == .04
+    payload['fourier']['centers'] = []
+    cleared = state.preview(payload)['diagnostics'][3]
+    assert cleared['png'] != card['png']
+
+
+def test_import_raw_spectrum_uses_all_discovered_bands(acquisition):
+    state = ProcessingState()
+    state.discover({'path': str(acquisition)})
+    version = state.version
+    payload = {'pattern': 'pattern1', 'wavenumber': 1658, 'x': 7, 'y': 4}
+    result = state.raw_inspection(payload)
+    assert [p['wavenumber'] for p in result['points']] == [1080, 1601, 1658, 1702]
+    for point in result['points']:
+        array = np.loadtxt(acquisition / 'stacks' / 'pattern1' / f"lineScan_{point['wavenumber']}_0invcm.csv", delimiter=',')
+        assert point['raw_signal'] == array[4, 7]
+    preview = state.raw_inspection({**payload, 'mode': 'image'})
+    assert (preview['width'], preview['height']) == (20, 16)
+    assert base64.b64decode(preview['png']).startswith(b'\x89PNG')
+    assert state.version == version and state.stage == 'discovered'
+    assert not state.raw and not state.mapping
+
+
+def test_raw_spectrum_reports_missing_bands(acquisition):
+    (acquisition / 'stacks/pattern1/lineScan_1080_0invcm.csv').unlink()
+    state = ProcessingState()
+    state.discover({'path': str(acquisition)})
+    result = state.raw_inspection({'pattern': 'pattern1', 'wavenumber': 1658, 'x': 0, 'y': 0})
+    assert result['missing_wavenumbers'] == [1080]
+    assert len(result['points']) == 3
+
+
+@pytest.mark.parametrize('override', [{'x': -1}, {'y': 16}, {'x': .5}, {'pattern': 'missing'}, {'wavenumber': 1234}])
+def test_raw_inspection_rejects_invalid_selection(acquisition, override):
+    state = ProcessingState()
+    state.discover({'path': str(acquisition)})
+    with pytest.raises(ValueError):
+        state.raw_inspection({'pattern': 'pattern0', 'wavenumber': 1658, 'x': 0, 'y': 0, **override})
+
+
+def test_raw_inspection_rejects_misaligned_shapes(acquisition):
+    np.savetxt(acquisition / 'stacks/pattern0/lineScan_1080_0invcm.csv', np.ones((8, 10)), delimiter=',')
+    state = ProcessingState()
+    state.discover({'path': str(acquisition)})
+    with pytest.raises(ValueError, match='shape'):
+        state.raw_inspection({'pattern': 'pattern0', 'wavenumber': 1658, 'x': 0, 'y': 0})

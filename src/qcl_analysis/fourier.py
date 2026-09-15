@@ -70,6 +70,8 @@ def gaussian_notch_mask(
     centers: ArrayLike,
     *,
     sigma: float = 0.01,
+    sigma_x: float | None = None,
+    sigma_y: float | None = None,
     strength: float = 0.9,
     protect_radius: float = 0.02,
 ) -> NDArray[np.float64]:
@@ -87,6 +89,9 @@ def gaussian_notch_mask(
     sigma : float
         Gaussian standard deviation in cycles/pixel, strictly positive.
         FWHM is about 2.355*sigma. Larger values remove a broader band.
+    sigma_x, sigma_y : float, optional
+        Independent X/Y standard deviations in cycles/pixel. Each omitted
+        axis uses sigma for compatibility with circular notches.
     strength : float
         Rejection depth from 0 (identity) to 1 (full rejection at the exact
         center). Overlapping notches use maximum rejection, not compounded
@@ -108,6 +113,11 @@ def gaussian_notch_mask(
         raise ValueError("shape must contain two integers >= 2.")
     if not np.isfinite(sigma) or sigma <= 0:
         raise ValueError("sigma must be finite and positive.")
+    width_x = sigma if sigma_x is None else sigma_x
+    width_y = sigma if sigma_y is None else sigma_y
+    for name, width in (("sigma_x", width_x), ("sigma_y", width_y)):
+        if not np.isfinite(width) or width <= 0:
+            raise ValueError(f"{name} must be finite and positive.")
     if not np.isfinite(strength) or not 0 <= strength <= 1:
         raise ValueError("strength must be between 0 and 1.")
     if not np.isfinite(protect_radius) or not 0 <= protect_radius < 0.5:
@@ -129,7 +139,7 @@ def gaussian_notch_mask(
         for sign in (-1, 1):
             dy = (fy - sign * cy + 0.5) % 1.0 - 0.5
             dx = (fx - sign * cx + 0.5) % 1.0 - 0.5
-            notch = np.exp(-0.5 * ((dy / sigma) ** 2 + (dx / sigma) ** 2))
+            notch = np.exp(-0.5 * ((dy / width_y) ** 2 + (dx / width_x) ** 2))
             rejection = np.maximum(rejection, notch)
     mask = 1.0 - strength * rejection
     mask[np.hypot(fy, fx) <= protect_radius] = 1.0
@@ -141,6 +151,8 @@ def apply_fourier_notch_filter(
     centers: ArrayLike,
     *,
     sigma: float = 0.01,
+    sigma_x: float | None = None,
+    sigma_y: float | None = None,
     strength: float = 0.9,
     protect_radius: float = 0.02,
     pad_pixels: int = 0,
@@ -167,7 +179,7 @@ def apply_fourier_notch_filter(
     padded = np.pad(array, pad_pixels, mode="reflect") if pad_pixels else array
     spectrum, fy, fx = fourier_spectrum(padded)
     mask = gaussian_notch_mask(
-        padded.shape, centers, sigma=sigma, strength=strength,
+        padded.shape, centers, sigma=sigma, sigma_x=sigma_x, sigma_y=sigma_y, strength=strength,
         protect_radius=protect_radius,
     )
     masked = spectrum * mask
@@ -267,3 +279,29 @@ def apply_fourier_lowpass_filter(
         filtered=filtered, removed=array - filtered, mask=mask,
         spectrum_before=spectrum, spectrum_after=masked, fy=fy, fx=fx,
     )
+
+
+def apply_fourier_combined_filter(image, centers=(), *, sigma=0.01,
+                                  sigma_x=None, sigma_y=None,
+                                  strength=0.9, protect_radius=0.02,
+                                  cutoff_x=0.15, cutoff_y=0.15,
+                                  pad_pixels=0, preserve_mean=True):
+    """Multiply notch and low-pass masks on the same padded FFT, then crop once.
+
+    Padding is applied once and mean restoration is performed only after the
+    combined inverse transform. No intermediate filtered crop is repadded.
+    """
+    array = _image_array(image)
+    notch = apply_fourier_notch_filter(
+        array, centers, sigma=sigma, sigma_x=sigma_x, sigma_y=sigma_y, strength=strength,
+        protect_radius=protect_radius, pad_pixels=pad_pixels, preserve_mean=False)
+    mask = notch.mask * gaussian_lowpass_mask(
+        notch.mask.shape, cutoff_x=cutoff_x, cutoff_y=cutoff_y)
+    masked = notch.spectrum_before * mask
+    filtered = np.fft.ifft2(np.fft.ifftshift(masked)).real
+    if pad_pixels:
+        filtered = filtered[pad_pixels:-pad_pixels, pad_pixels:-pad_pixels]
+    if preserve_mean:
+        filtered = filtered + array.mean() - filtered.mean()
+    return FourierFilterResult(filtered, array-filtered, mask,
+                               notch.spectrum_before, masked, notch.fy, notch.fx)
