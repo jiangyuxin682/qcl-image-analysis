@@ -35,7 +35,8 @@ def test_ambiguous_gold_rejected():
 def test_crop_pipeline_uses_pattern_rois():
     from ui.app_processing import ProcessingState
     state = ProcessingState()
-    state.stage = 'configured'
+    state.stage = 'referenced'
+    state.has_gold = True
     state.patterns = ['p0', 'p1']
     state.bands = [1601, 1658]
     state.ref = {(p, w): frame(dx) for p, dx in [('p0', 0), ('p1', 5)] for w in state.bands}
@@ -43,7 +44,7 @@ def test_crop_pipeline_uses_pattern_rois():
     payload = {'roi': {'x_min': 25, 'x_max': 65, 'y_min': 5, 'y_max': 25},
                'drift': {'enabled': True, 'reference_pattern': 'p0', 'wavenumber': 1658, 'side': 'both', 'max_shift': 10}}
     state.crop_plan(payload)
-    assert state.stage == 'configured' and not state.crops
+    assert state.stage == 'referenced' and not state.crops
     state.crop(payload)
     for wn in state.bands:
         np.testing.assert_array_equal(state.crops[('p1', wn)], state.ref[('p1', wn)][5:25,30:70])

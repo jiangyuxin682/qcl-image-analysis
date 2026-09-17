@@ -5,6 +5,10 @@ environment, or use `ui/launch_processing_macos.command` on macOS. The separate
 interface opens at http://127.0.0.1:8766. The original `ui/app.py` remains intact.
 Install the project with `python -m pip install -e '.[ui,dev]'` if needed.
 
+On Windows, run `ui/setup_windows.bat` once, then
+`ui/launch_processing_windows.bat`. For a standalone EXE with all runtime
+dependencies included, follow [Windows packaging](../packaging/README.md).
+
 ## How the workflow works
 
 1. Scan a stacks directory, a pattern directory, an acquisition directory with
@@ -14,27 +18,38 @@ Install the project with `python -m pip install -e '.[ui,dev]'` if needed.
    bracket the center and exclude the center itself. The union of all center
    and reference bands is the processing set. Select one or more complete
    patterns; missing-band patterns are shown and cannot be selected.
-3. Compute each full image's brightest-pixel mean and relative reflectance.
-   QC measures reference variation across the selected patterns. Draw one
-   shared on-MS ROI, checking alignment by changing the preview band/pattern.
-4. Apply paired Gaussian notches or an elliptical Gaussian low-pass, then a
+3. **Calculate reflectance:** explicitly choose whether a gold patch reference
+   is available. With gold, each full image is divided by its brightest-N-pixel
+   mean. Cyan crosses show the exact normalization pixels beside the resulting
+   reflectance image; verify that they belong to gold. QC measures reference
+   variation across patterns. Without gold, skip normalization and retain raw
+   MCT intensity. This choice is independent for each dataset tab.
+4. Draw one shared on-MS ROI on the selected signal (raw intensity without gold,
+   reflectance with gold), checking alignment across bands/patterns. Gold drift
+   tracking is available only with a gold reference.
+5. Apply paired Gaussian notches or an elliptical Gaussian low-pass, then a
    rolling-ball multiplicative flat-field correction to every selected image.
    Fourier can be bypassed explicitly. Parameter meanings appear next to the
    controls. Inspection-window settings affect only the spectrum preview.
-5. Choose a shared rectangular analyte-free ROI, or select a fixed number of the
+6. Choose a shared rectangular analyte-free ROI, or select a fixed number of the
    brightest or darkest valid pixels in a chosen reference band for each pattern.
    All bands within that pattern share those coordinates and calculate their
-   own R0 from their own reflectance values.
+   own reference mean from their own corrected signal values. With gold,
+   A = −log10(R_corrected / R0); without gold,
+   A = −log10(I_corrected / I_bg). No reflectance array is created without gold.
    Thin cyan crosses identify the selected positions in the current preview. Each
    image gets its own R0 and absorbance, followed by its configured pixelwise
    spectral baseline correction. Two references interpolate; more fit least
    squares.
-6. Calculate baseline correction separately, compare absorbance before and after
+7. Calculate baseline correction separately, compare absorbance before and after
    correction, and inspect individual pixel fits.
-7. Inspect six stages with inferno. Different bands have independent scales;
-   each band's three reflectance stages share a scale, as do its two absorbance
+8. Inspect six stages with gold, or five without gold, using inferno. Different
+   bands have independent scales; each band's input/Fourier/rolling stages
+   share a scale, as do its two absorbance
    stages. Draw shared CNR background and target ROIs. Export all selected
    patterns and bands, including metadata, masks, QC, R0 and CNR arrays/tables.
+   Gold-normalized exports include full-image normalization pixel coordinates.
+   Raw-only exports omit reflectance arrays. Metadata records the signal basis.
 
 The new processing path follows notebook 06's on-MS workflow. The original app
 still provides its independent on-MS/out-MS workflow. This interface also
@@ -65,7 +80,7 @@ Parameter edits automatically preview the current pattern and band after a
 processing function as batch processing, without changing committed arrays.
 Only one preview runs at a time; newer edits replace pending work and stale
 responses are discarded. Larger rolling-ball radii may take longer to update.
-The before/Fourier/rolling images share a reflectance scale. Use Process all
+The before/Fourier/rolling images share an input-signal scale. Use Process all
 involved bands to commit the settings before calculating absorbance and CNR.
 
 - Notch coordinates are `(fy, fx)` in cycles/pixel, unrelated to cm^-1. Their
@@ -74,11 +89,11 @@ involved bands to commit the settings before calculating absorbance and CNR.
   frequencies unchanged.
 - Low-pass x/y cutoffs are half-amplitude frequency semi-axes. Equal widths
   give a circular mask. Lower widths smooth more strongly along that axis.
-- Rolling-ball radius is spatial pixels; cap height is reflectance units.
+- Rolling-ball radius is spatial pixels; cap height is in input-signal units.
   Dark-feature mode estimates an upper background; bright-feature mode a lower
   background. Correction multiplies by median(background)/background.
 - A rectangular analyte-free ROI must contain only finite positive values in every
-  selected image. Extreme-pixel modes rank only finite positive reflectance,
+  selected image. Extreme-pixel modes rank only finite positive signal,
   break ties in row-major order, and reject counts larger than the available
   pixels. Selection coordinates and a mask are exported for every image.
 - CNR is abs(target mean - background mean) / background sample standard
@@ -101,12 +116,38 @@ results. Reconfiguring bands, crops, processing or R0 clears dependent numerical
 results; the browser also locks downstream pages when inputs are edited.
 This is a single-user in-memory session, not a persistent multi-user service.
 
+## CNR and display contrast
+
+Section 8 CNR uses numerical values clipped to the current display percentile
+limits, before color mapping. The default 0–100 leaves finite values unchanged.
+The percentile setting applies to every selected pattern/band; the actual bounds
+follow each stage's shared display scale. No image-processing arrays are changed.
+Changing percentiles requires recalculating CNR before exporting. In multi-folder
+comparison, changing a folder's percentile automatically recalculates its CNR.
+
+Clipping can suppress background variation and inflate CNR, so this is a measure
+of the adjusted display, not an independent measure of acquisition quality.
+Unadjusted CNR remains available alongside the adjusted value. `cnr_summary.csv`
+and `metadata.json` record each pattern, band and stage, both CNR values,
+percentiles, actual clipping bounds, adjustment method and validity status.
+
+Each image has its own optional **Set lower limit to 0** switch, including raw
+inspection, individual processing diagnostics, baseline inspection and timelapse.
+Multi-folder comparison has an independent switch on each dataset image.
+Selections are retained per plot within the current page session; changing one
+plot does not change any other plot's scale.
+It changes only color mapping: negative values saturate at the lowest color,
+while numerical arrays, spectra, percentile-based CNR and unadjusted CNR remain
+unchanged. If the display upper bound is nonpositive, a small positive bound is
+used to keep the color scale valid. Turn the switch off to restore the normal
+display range. Exported videos use the selected display scale.
+
 ## Pixel baseline inspection
 
-Step 5 calculates absorbance and shows it alongside the reflectance previews.
-Continue to step 6 and click Calculate baseline correction to commit the
-pixelwise fit. Step 6 shows before/after absorbance and the pixel inspector.
-Reference-only bands have no corrected center image. Step 7 provides stage
+Step 6 calculates absorbance and shows it alongside the corrected signal previews.
+Continue to step 7 and click Calculate baseline correction to commit the
+pixelwise fit. Step 7 shows before/after absorbance and the pixel inspector.
+Reference-only bands have no corrected center image. Step 8 provides stage
 comparison, CNR, timelapse, and export.
 
 The pixel inspector has independent pattern and center-band selectors. Click
@@ -123,7 +164,7 @@ absorbance before baseline, and absorbance after baseline.
 
 ## CNR display and pattern ranges
 
-Section 7 calculates only CNR = abs(signal-background)/noise. Signal is the
+Section 8 calculates only CNR = abs(signal-background)/noise. Signal is the
 target mean, background is the background mean, and noise is the background
 sample standard deviation (ddof=1). The same finite-pixel intersection is used
 across stages. Each image has a title followed by a separate parameter line.

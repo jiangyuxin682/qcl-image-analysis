@@ -1,0 +1,31 @@
+QCL Processing Workbench - Windows x64
+======================================
+
+1. Extract the entire ZIP to a folder on your computer.
+2. Double-click "QCL Processing.exe".
+3. Your browser opens the analysis interface. Use your own local data path.
+
+Python, VS Code, Conda and FFmpeg do not need to be installed.
+Keep the _internal folder beside the EXE. Do not run the EXE from inside a ZIP.
+
+The small QCL Processing window controls the app:
+  Open analysis UI - reopen the browser without restarting the session.
+  Quit - stop the app. Export your results first; sessions live in memory.
+Closing only the browser does not stop the app. Closing the controller does.
+
+The app runs on this computer only. The default address is
+http://127.0.0.1:8766; if occupied, the app chooses another available port.
+Each new app process has its own session; keep using its displayed address.
+
+Input: lineScan_<integer wavenumber>_0invcm.csv files in pattern folders.
+All bands in a pattern should use matching image dimensions.
+
+Logs: %LOCALAPPDATA%\QCL Processing\app.log
+If the app fails to start, provide that log when reporting the issue.
+
+BUILD_CHECK.json records checks run inside this executable during packaging.
+BUILD_DEPENDENCIES.txt records the build's dependency versions.
+THIRD_PARTY contains notices for included components.
+
+Target: Windows 10/11, 64-bit Intel/AMD. Windows ARM is not a tested target.
+This build is not code-signed; Windows may display an unknown-publisher prompt.

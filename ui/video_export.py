@@ -9,10 +9,24 @@ import io
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from matplotlib import colormaps, font_manager
+
+
+def find_ffmpeg():
+    """Prefer the app's bundled encoder, then the source-install system encoder."""
+    if getattr(sys, "frozen", False):
+        folder = Path(sys._MEIPASS) / "ffmpeg"
+        candidates = sorted(folder.glob("ffmpeg*.exe" if sys.platform == "win32" else "ffmpeg*"))
+        if candidates:
+            return str(candidates[0])
+    executable = shutil.which("ffmpeg")
+    if not executable and Path('/opt/homebrew/bin/ffmpeg').exists():
+        executable = '/opt/homebrew/bin/ffmpeg'
+    return executable
 
 
 def encode_video(video, fps, labels):
@@ -20,9 +34,7 @@ def encode_video(video, fps, labels):
         raise ValueError("Playback FPS must be between 1 and 20.")
     if len(labels) != len(video['frames']) or any(not isinstance(x, str) or len(x)>1000 for x in labels):
         raise ValueError("Expected one timestamp label per video frame.")
-    executable = shutil.which('ffmpeg')
-    if not executable and Path('/opt/homebrew/bin/ffmpeg').exists():
-        executable = '/opt/homebrew/bin/ffmpeg'
+    executable = find_ffmpeg()
     if not executable:
         raise ValueError("MP4 export requires FFmpeg. Install FFmpeg and restart the app.")
     stage = {
@@ -33,6 +45,8 @@ def encode_video(video, fps, labels):
         "absorbance": "Absorbance before baseline",
         "baseline": "Absorbance after baseline",
     }[video["kind"]]
+    if video.get("processing_basis") == "raw_intensity":
+        stage = stage.replace("Reflectance", "Raw intensity")
     title = f"{video['wavenumber']} cm⁻¹ · {stage} · Contrast: {video['low']:g}–{video['high']:g} percentiles · FPS: {fps:g}"
     font_path = font_manager.findfont('DejaVu Sans')
     font = ImageFont.truetype(font_path, 20)
@@ -70,7 +84,7 @@ def encode_video(video, fps, labels):
             draw.text((24,ih+90+extra_height),label,font=font,fill='#213a35')
             canvas.save(Path(folder)/f'{i:06d}.png')
         output = Path(folder)/'timelapse.mp4'
-        result = subprocess.run([executable,'-y','-loglevel','error','-framerate',str(fps),'-i',str(Path(folder)/'%06d.png'),'-c:v','libx264','-pix_fmt','yuv420p','-movflags','+faststart',str(output)],capture_output=True)
+        result = subprocess.run([executable,'-y','-loglevel','error','-framerate',str(fps),'-i',str(Path(folder)/'%06d.png'),'-c:v','libx264','-pix_fmt','yuv420p','-movflags','+faststart',str(output)],capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0)
         if result.returncode:
             raise ValueError('Video encoding failed: '+result.stderr.decode(errors='replace')[-1000:])
         return output.read_bytes()

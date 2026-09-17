@@ -7,7 +7,7 @@ async function api(url,payload){const r=await fetch(url,payload?{method:'POST',h
 function tell(d,message){d.frame.contentWindow.postMessage(message,location.origin);}
 function tabs(){
   const root=$('#dataset-tabs');root.replaceChildren();
-  for(const d of datasets){const b=el('button',`${d.name} · ${d.maxStep||1}/7`);b.className=d.id===active?'secondary active':'secondary';b.disabled=datasets.some(x=>x.busy);b.onclick=()=>select(d.id);root.append(b);}
+  for(const d of datasets){const b=el('button',`${d.name} · ${d.maxStep||1}/8`);b.className=d.id===active?'secondary active':'secondary';b.disabled=datasets.some(x=>x.busy);b.onclick=()=>select(d.id);root.append(b);}
   const b=el('button','Final comparison');b.className=active==='comparison'?'secondary active':'secondary';b.disabled=datasets.length<2||datasets.some(d=>d.busy);b.onclick=()=>select('comparison');root.append(b);
   $('#add-folder').disabled=datasets.some(d=>d.busy);
 }
@@ -36,27 +36,37 @@ window.addEventListener('message',e=>{
 function fill(node,values,value){node.replaceChildren();values.forEach(v=>{const o=el('option',String(v));o.value=v;node.append(o);});if(values.map(String).includes(String(value)))node.value=value;}
 function commonBands(){const stage=$('#compare-stage').value;return info.reduce((a,d)=>{const bands=stage==='baseline'?Object.keys(d.mapping).map(Number):d.bands;return a===null?bands:a.filter(v=>bands.includes(v));},null)||[];}
 function stable(value){if(Array.isArray(value))return value.map(stable);if(value&&typeof value==='object')return Object.fromEntries(Object.keys(value).sort().map(k=>[k,stable(value[k])]));return value;}
-function signature(d){return JSON.stringify(stable({mapping:d.mapping,parameters:d.parameters,n_pixels:d.n_pixels,qc:d.qc_settings,r0:{method:d.r0_selection.method,count:d.r0_selection.count}}));}
+function signature(d){return JSON.stringify(stable({mapping:d.mapping,parameters:d.parameters,r0:{method:d.r0_selection.method,count:d.r0_selection.count}}));}
 async function loadComparison(){
   const current=++revision;$('#comparison-grid').replaceChildren();$('#compare-export').disabled=true;
   try{
     info=await api('/api/comparison-info?'+new URLSearchParams({ids:datasets.map(d=>d.id).join(',')}));if(current!==revision)return;
-    const incomplete=datasets.filter(d=>d.maxStep<7||d.cnrDirty||!info.find(i=>i.id===d.id)?.cnr.length);
+    const incomplete=datasets.filter(d=>d.maxStep<8||d.cnrDirty||!info.find(i=>i.id===d.id)?.cnr.length);
     if(incomplete.length){$('#compare-status').textContent='Finish processing and calculate CNR for: '+incomplete.map(d=>d.name).join(', ');return;}
     if(new Set(info.map(signature)).size!==1){$('#compare-status').textContent='Shared processing settings differ. Reconfigure/process/calculate the affected datasets before comparison.';return;}
+    if(new Set(info.filter(d=>d.has_gold).map(d=>JSON.stringify(stable({n_pixels:d.n_pixels,qc:d.qc_settings})))).size>1){$('#compare-status').textContent='Gold-reference settings differ. Recalculate reflectance and subsequent steps for the affected datasets.';return;}
+    const reflectanceOption=$('#compare-stage option[value="reflectance"]');reflectanceOption.disabled=reflectanceOption.hidden=info.some(d=>!d.has_gold);
+    if(reflectanceOption.disabled&&$('#compare-stage').value==='reflectance')$('#compare-stage').value='raw';
     fill($('#compare-band'),commonBands(),$('#compare-band').value);if(!$('#compare-band').value){$('#compare-status').textContent='No common wavenumber for this stage.';return;}
     $('#compare-export').disabled=false;$('#compare-status').textContent='Each image has its own color scale. CNR uses each folder’s independently selected target and background ROIs.';
     const kind=$('#compare-stage').value,wn=+$('#compare-band').value;
     for(const d of info){
-      const card=el('div');card.className='card';card.append(el('h3',d.name));const options=el('div');options.className='dataset-options';
-      const choice=selections.get(d.id)||{pattern:d.patterns[0],low:0,high:100};selections.set(d.id,choice);
+      const card=el('div');card.className='card';card.append(el('h3',d.name));card.append(el('p',d.has_gold?'Processing basis: gold-normalized reflectance':'Processing basis: raw intensity · reflectance skipped'));const options=el('div');options.className='dataset-options';
+      const choice=selections.get(d.id)||{pattern:d.patterns[0]};choice.low=d.cnr[0]?.contrast_low_percentile??0;choice.high=d.cnr[0]?.contrast_high_percentile??100;selections.set(d.id,choice);
       const label=el('label','Pattern'),select=el('select');fill(select,d.patterns,choice.pattern);choice.pattern=select.value;label.append(select);options.append(label);
-      for(const key of ['low','high']){const l=el('label',`${key==='low'?'Lower':'Upper'} display percentile`),input=el('input');input.type='number';input.min=0;input.max=100;input.value=choice[key];input.onchange=()=>{choice[key]=Number(input.value);loadComparison();};l.append(input);options.append(l);}
+      for(const key of ['low','high']){const l=el('label',`${key==='low'?'Lower':'Upper'} display / CNR percentile`),input=el('input');input.type='number';input.min=0;input.max=100;input.value=choice[key];input.onchange=async()=>{
+        const dataset=datasets.find(x=>x.id===d.id),range={low:choice.low,high:choice.high,[key]:Number(input.value)};
+        dataset.busy=true;tabs();$('#compare-export').disabled=true;document.querySelectorAll('#comparison input, #comparison select, #comparison button').forEach(n=>n.disabled=true);
+        try{const result=await api('/api/cnr?'+new URLSearchParams({dataset:d.id}),{...d.cnr_rois,...range});tell(dataset,{type:'cnr-contrast',...range,records:result.records});}
+        catch(e){$('#compare-status').textContent=e.message;input.value=choice[key];}
+        finally{dataset.busy=false;tabs();document.querySelectorAll('#comparison input, #comparison select, #comparison button').forEach(n=>n.disabled=false);await loadComparison();}
+      };l.append(input);options.append(l);}
       select.onchange=()=>{choice.pattern=select.value;loadComparison();};card.append(options);
+      choice.zero??={};const zeroLabel=el('label'),zeroInput=el('input');zeroInput.type='checkbox';zeroInput.checked=!!choice.zero[kind];zeroLabel.append(zeroInput,document.createTextNode('Set lower limit to 0 · display only'));card.append(zeroLabel);zeroInput.onchange=()=>{choice.zero[kind]=zeroInput.checked;loadComparison();};
       card.append(el('h4',$('#compare-stage').selectedOptions[0].textContent));const metrics=el('p');metrics.className='cnr-parameters';const row=d.cnr.find(r=>r.pattern===choice.pattern&&r.wavenumber===wn&&r.stage===kind);
       const number=(v,digits=2)=>typeof v==='number'&&Number.isFinite(v)?digits===0?v.toFixed(0):v.toExponential(2):'—';
-      metrics.innerHTML=`CNR: ${number(row?.cnr,0)} · <i>A</i><sub>s</sub>: ${number(row?.target_mean)} · <i>A</i><sub>bg</sub>: ${number(row?.background_mean)} · σ<sub>bg</sub>: ${number(row?.background_std)} · |<i>A</i><sub>s</sub> − <i>A</i><sub>bg</sub>|: ${number(row?.signed_contrast==null?null:Math.abs(row.signed_contrast))}`;card.append(metrics);$('#comparison-grid').append(card);
-      const data=await api('/api/image?'+new URLSearchParams({dataset:d.id,pattern:choice.pattern,wavenumber:wn,kind,low:choice.low,high:choice.high}));if(current!==revision)return;
+      metrics.innerHTML=`<div>Unadjusted CNR: ${number(row?.cnr_unadjusted,0)} · CNR: ${number(row?.cnr,0)} · Percentiles: ${row?.contrast_low_percentile}–${row?.contrast_high_percentile}</div><div><i>A</i><sub>s</sub>: ${number(row?.target_mean)} · <i>A</i><sub>bg</sub>: ${number(row?.background_mean)} · σ<sub>bg</sub>: ${number(row?.background_std)} · |<i>A</i><sub>s</sub> − <i>A</i><sub>bg</sub>|: ${number(row?.signed_contrast==null?null:Math.abs(row.signed_contrast))}</div>`;card.append(metrics);$('#comparison-grid').append(card);
+      const data=await api('/api/image?'+new URLSearchParams({dataset:d.id,pattern:choice.pattern,wavenumber:wn,kind,low:choice.low,high:choice.high,colorbar_zero:!!choice.zero[kind]}));if(current!==revision)return;
       if(!data.available){card.append(el('p','Stage unavailable'));continue;}
       const wrap=el('div');wrap.className='heatmap';const img=el('img');img.alt=`${d.name} ${choice.pattern} ${wn} ${kind}`;img.src='data:image/png;base64,'+data.png;const bar=el('div');bar.className='bar';const strip=el('div');strip.className='strip';const ticks=el('div');ticks.className='ticks';[data.vmax,(data.vmin+data.vmax)/2,data.vmin].forEach(v=>ticks.append(el('span',v.toFixed(3))));bar.append(strip,ticks);
       const holder=el('div');holder.style.cssText='position:relative;width:calc(100% - 60px);align-self:start';img.style.width='100%';img.style.display='block';holder.append(img);

@@ -29,6 +29,27 @@ The on-MS and out-MS regions are normalized independently.
 
 ## QCL Image Workbench
 
+### Current Processing UI and Windows app
+
+For an independent synthetic-image and Fourier-filter experiment interface,
+run `python ui/app_fourier_lab.py` (port 8767). It supports constant-width letters
+with square/rounded corners, noise, imported images, interactive notch selection,
+and before/after spectra. See [Fourier Image Lab](ui/README_FOURIER_LAB.md).
+
+The current eight-section processing interface is `ui/app_processing.py`.
+After selecting spectral bands, choose whether a gold patch reference is
+available. With gold, inspect the normalization pixels and reflectance preview;
+without gold, crop and correct raw intensity directly before absorbance.
+For source installs on Windows, run `ui/setup_windows.bat` once, then
+`ui/launch_processing_windows.bat`. It opens at `http://127.0.0.1:8766`.
+
+For a standalone Windows application requiring no Python or VS Code on the
+user's computer, see [Windows packaging](packaging/README.md). A Windows builder
+can double-click `build_windows.bat`, or use the **Build Windows app** GitHub
+Actions workflow to produce the tested application ZIP.
+
+The instructions below describe the original `ui/app.py` interface.
+
 The UI runs locally and opens in a web browser. Images and results remain on
 the computer; `127.0.0.1` is not a public internet address.
 

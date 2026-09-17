@@ -3,7 +3,7 @@
 Run ``python ui/app_processing.py`` from the repository (default port 8766).
 Filename discovery precedes explicit center/reference-band assignment. The
 union of selected bands is processed independently for each selected pattern:
-full raw normalization -> shared on-MS crop -> Fourier -> rolling-ball field
+optional gold normalization -> shared on-MS crop -> Fourier -> rolling-ball field
 -> per-image analyte-free reference -> absorbance -> pixelwise baseline -> CNR.
 
 All operations run locally. Mutations commit complete results under a lock and
@@ -23,6 +23,7 @@ import os
 import re
 import sys
 import threading
+import tempfile
 import time
 import webbrowser
 import zipfile
@@ -37,7 +38,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "src"))
 os.environ.setdefault(
-    "MPLCONFIGDIR", str(Path(os.environ.get("TMPDIR", "/tmp")) / "qcl-processing-mpl")
+    "MPLCONFIGDIR", str(Path(tempfile.gettempdir()) / "qcl-processing-mpl")
 )
 
 import numpy as np
@@ -60,10 +61,24 @@ from qcl_analysis.fourier import (
 )
 from qcl_analysis.io import load_qcl_csv
 from qcl_analysis.qc import add_frame_quality_flags, add_reference_quality_flags
-from qcl_analysis.reflectance import calculate_gold_reference
+from qcl_analysis.reflectance import get_brightest_pixel_indices
 from qcl_analysis.roi import ROI
 from ui.app import render_data_png
 from ui.video_export import encode_video
+
+
+def display_limits(limits, payload):
+    """Zero anchoring changes only the renderer, never analytical clipping."""
+    if payload.get("colorbar_zero") in (True, "true", "1"):
+        return (0.0, max(float(limits[1]), 1e-12))
+    return limits
+
+
+def render_processing_png(array, payload, *, limits=None, low=0, high=100):
+    if limits is None:
+        finite = array[np.isfinite(array)]
+        limits = tuple(np.percentile(finite, [low, high])) if finite.size else (0.0, 1.0)
+    return render_data_png(array, limits=display_limits(limits, payload))
 
 STATIC = Path(__file__).with_name("static_processing")
 FILE_RE = re.compile(r"^lineScan_(\d+)_0invcm\.csv$", re.IGNORECASE)
@@ -220,6 +235,10 @@ class ProcessingState:
         self.bands = []
         self.raw = {}
         self.ref = {}
+        self.has_gold = None
+        self.gold_pixels = {}
+        self.n_pixels = 0
+        self.qc_settings = {}
         self.qc = pd.DataFrame()
         self.on_roi = None
         self.on_rois = {}
@@ -248,6 +267,7 @@ class ProcessingState:
             "empty",
             "discovered",
             "configured",
+            "referenced",
             "cropped",
             "processed",
             "absorbed",
@@ -263,6 +283,8 @@ class ProcessingState:
             "patterns": self.patterns,
             "bands": self.bands,
             "mapping": self.mapping,
+            "has_gold": self.has_gold,
+            "processing_basis": "reflectance" if self.has_gold else "raw_intensity",
             "on_roi": asdict(self.on_roi) if self.on_roi else None,
             "r0_roi": asdict(self.r0_roi) if self.r0_roi else None,
             "r0_selection": self.r0_selection,
@@ -301,7 +323,7 @@ class ProcessingState:
         common = {"pattern": pattern, "wavenumber": wn, "width": width,
                   "height": height, "version": self.version}
         if payload.get("mode") == "image":
-            png, lo, hi = render_data_png(image)
+            png, lo, hi = render_processing_png(image, payload)
             return {**common, "png": base64.b64encode(png).decode(), "vmin": lo, "vmax": hi}
         x, y = integer(payload["x"], "Pixel x"), integer(payload["y"], "Pixel y")
         if not (0 <= x < width and 0 <= y < height):
@@ -472,34 +494,18 @@ class ProcessingState:
                 raise ValueError(
                     f"{pattern} is missing required bands: {sorted(missing)}"
                 )
-        n_pixels = integer(payload.get("n_pixels", 100), "Brightest pixels")
-        raw, ref, signals = {}, {}, []
+        raw = {}
         for row in selected.itertuples(index=False):
             image = load_qcl_csv(row.path)
-            gold = calculate_gold_reference(image, n_pixels)
             key = (row.pattern, int(row.wavenumber))
-            raw[key], ref[key] = image, image / gold
-            signals.append(gold)
+            raw[key] = image
         if len({a.shape for a in raw.values()}) != 1:
             raise ValueError(
                 "All selected images must have the same spatial shape. Registration is not performed."
             )
-        selected["i_goldref"] = signals
-        selected["gold_reference_n_pixels"] = n_pixels
-        z = float(payload.get("robust_z_threshold", 5))
-        deviation = float(payload.get("relative_threshold", 0.1))
-        selected = add_reference_quality_flags(
-            selected, robust_z_threshold=z, min_relative_deviation=deviation
-        )
-        selected = add_frame_quality_flags(selected, expected_wavenumbers=set(bands))
         self.reset_analysis()
         self.mapping, self.patterns, self.bands = mapping, patterns, bands
-        self.raw, self.ref, self.qc = raw, ref, selected
-        self.n_pixels = n_pixels
-        self.qc_settings = {
-            "robust_z_threshold": z,
-            "min_relative_deviation": deviation,
-        }
+        self.raw, self.qc = raw, selected
         self.stage = "configured"
         self.version += 1
         return {
@@ -508,23 +514,73 @@ class ProcessingState:
             "qc": selected.drop(columns="path").to_dict(orient="records"),
         }
 
+    def normalize(self, payload):
+        """Commit either per-image gold normalization or the unchanged raw path."""
+        self.require("configured")
+        has_gold = payload.get("has_gold")
+        if not isinstance(has_gold, bool):
+            raise ValueError("Specify whether a gold patch reference is available.")
+        selected = self.dataset[self.dataset.pattern.isin(self.patterns) & self.dataset.wavenumber.isin(self.bands)].copy()
+        ref, pixels, signals = {}, {}, []
+        n_pixels = integer(payload.get("n_pixels", 100), "Brightest pixels") if has_gold else 0
+        qc_settings = {}
+        if has_gold:
+            for row in selected.itertuples(index=False):
+                key = (row.pattern, int(row.wavenumber))
+                yy, xx, values = get_brightest_pixel_indices(self.raw[key], n_pixels)
+                gold = float(np.mean(values))
+                if not np.isfinite(gold) or gold <= 0:
+                    raise ValueError("Gold-reference signal must be finite and positive.")
+                ref[key] = self.raw[key] / gold
+                pixels[key] = np.column_stack((yy, xx))
+                signals.append(gold)
+            selected["i_goldref"] = signals
+            selected["gold_reference_n_pixels"] = n_pixels
+            qc_settings = {"robust_z_threshold": float(payload.get("robust_z_threshold", 5)),
+                           "min_relative_deviation": float(payload.get("relative_threshold", .1))}
+            selected = add_reference_quality_flags(selected, **qc_settings)
+            selected = add_frame_quality_flags(selected, expected_wavenumbers=set(self.bands))
+        else:
+            selected["i_goldref"] = np.nan
+            selected["gold_reference_n_pixels"] = 0
+            selected["reference_valid"] = None
+            selected["frame_valid"] = selected.pattern.map({
+                p: all(np.isfinite(a).all() for (pattern, _), a in self.raw.items() if pattern == p)
+                for p in self.patterns})
+        selected["reflectance_calculated"] = has_gold
+        self.ref, self.gold_pixels, self.has_gold = ref, pixels, has_gold
+        self.n_pixels, self.qc, self.qc_settings = n_pixels, selected, qc_settings
+        self.on_roi, self.on_rois, self.drift, self.crops = None, {}, {}, {}
+        self.clear_processed()
+        self.last_video = None
+        self.stage = "referenced"
+        self.version += 1
+        return {**self.status(), "qc": selected.drop(columns="path").to_dict(orient="records")}
+
+    def processing_images(self):
+        self.require("referenced")
+        return self.ref if self.has_gold else self.raw
+
     def crop_plan(self, payload):
         """Preview exactly the crop coordinates later used by every stage."""
-        self.require("configured")
+        self.require("referenced")
+        images = self.processing_images()
         roi = roi_from(payload["roi"])
         drift = payload.get("drift", {})
         rois = {pattern: roi for pattern in self.patterns}
         records = []
         if drift.get("enabled", False):
+            if not self.has_gold:
+                raise ValueError("Gold drift tracking requires a gold patch reference.")
             pattern = drift["reference_pattern"]
             wn = integer(drift["wavenumber"], "Drift reference wavenumber")
             if pattern not in self.patterns or wn not in self.bands:
                 raise ValueError("Choose a configured drift reference pattern and band.")
             rois, records = gold_drift_rois(
-                {p: self.ref[(p, wn)] for p in self.patterns}, pattern, roi,
+                {p: images[(p, wn)] for p in self.patterns}, pattern, roi,
                 drift.get("side", "both"), integer(drift.get("max_shift", 20), "Maximum drift")
             )
-        for key, image in self.ref.items():
+        for key, image in images.items():
             crop_image(image, rois[key[0]], copy=False)
         return {"rois": {p: asdict(r) for p, r in rois.items()}, "records": records}
 
@@ -532,7 +588,7 @@ class ProcessingState:
         plan = self.crop_plan(payload)
         roi = roi_from(payload["roi"])
         rois = {p: roi_from(r) for p, r in plan["rois"].items()}
-        crops = {key: crop_image(a, rois[key[0]]) for key, a in self.ref.items()}
+        crops = {key: crop_image(a, rois[key[0]]) for key, a in self.processing_images().items()}
         if min(next(iter(crops.values())).shape) < 2:
             raise ValueError("The on-MS crop must be at least 2 × 2 pixels.")
         self.on_roi, self.on_rois, self.crops = roi, rois, crops
@@ -658,7 +714,8 @@ class ProcessingState:
         for title, array in zip(
             ("Before processing", "After Fourier", "After rolling ball"), arrays
         ):
-            png, lo, hi = render_data_png(array, limits=limits)
+            card_payload = {**payload, "colorbar_zero": title in payload["colorbar_zero_titles"]} if "colorbar_zero_titles" in payload else payload
+            png, lo, hi = render_processing_png(array, card_payload, limits=limits)
             cards.append(
                 {
                     "title": title,
@@ -687,7 +744,8 @@ class ProcessingState:
                     }
                 )
                 return
-            png, lo, hi = render_data_png(array, limits=scale)
+            card_payload = {**payload, "colorbar_zero": title in payload["colorbar_zero_titles"]} if "colorbar_zero_titles" in payload else payload
+            png, lo, hi = render_processing_png(array, card_payload, limits=scale)
             diagnostics.append(
                 {
                     "title": title,
@@ -722,21 +780,21 @@ class ProcessingState:
             "Signal removed by Fourier: input − filtered",
             output.removed,
             (-removed_bound, removed_bound),
-            "Signed reflectance removed by the current Fourier filter. Updates when notches or widths change; combined mode includes low-pass removal. May include specimen detail.",
+            "Signed signal removed by the current Fourier filter. Updates when notches or widths change; combined mode includes low-pass removal. May include specimen detail.",
         )
         enabled = bool(payload["rolling"].get("enabled", True))
         diagnostic(
             "Estimated rolling-ball background",
             flat.background,
             self.limits([output.filtered, flat.background], low, high),
-            "Estimated illumination field (reflectance). Correction divides by this field and rescales; it is not subtracted.",
+            "Estimated illumination field (input signal units). Correction divides by this field and rescales; it is not subtracted.",
             enabled,
         )
         diagnostic(
             "Rolling-ball correction gain",
             flat.gain,
             self.limits([flat.gain], low, high),
-            "Gain = reference level / background. Corrected reflectance = input reflectance × gain.",
+            "Gain = reference level / background. Corrected signal = input signal × gain.",
             enabled,
         )
         removed = output.filtered - flat.corrected
@@ -746,7 +804,7 @@ class ProcessingState:
             "Rolling-ball difference: input − corrected",
             removed,
             (-bound, bound),
-            "Signed change in reflectance, distinct from the estimated illumination background.",
+            "Signed change in signal, distinct from the estimated illumination background.",
         )
         return {
             "images": cards,
@@ -837,7 +895,7 @@ class ProcessingState:
                 reference = flat.corrected[pixels[:, 0], pixels[:, 1]]
             if not np.isfinite(reference).all() or (reference <= 0).any():
                 raise ValueError(
-                    f"Analyte-free selection contains invalid reflectance at {key}. Select another reference."
+                    f"Analyte-free selection contains invalid signal at {key}. Select another reference."
                 )
             r0 = float(np.mean(reference))
             a = calculate_absorbance(flat.corrected, r0)
@@ -927,7 +985,7 @@ class ProcessingState:
         self.require("cropped")
         return {
             "raw": crop_image(self.raw[key], self.on_rois[key[0]]),
-            "reflectance": self.crops[key],
+            "reflectance": self.crops[key] if self.has_gold else None,
             "fourier": self.ff[key].filtered if key in self.ff else None,
             "rolling": self.flat[key].corrected if key in self.flat else None,
             "absorbance": self.absorbance.get(key),
@@ -939,17 +997,38 @@ class ProcessingState:
     def cnr(self, payload):
         self.require("complete")
         bg, target = roi_from(payload["background"]), roi_from(payload["target"])
+        low, high = float(payload.get("low", 0)), float(payload.get("high", 100))
+        if not 0 <= low < high <= 100:
+            raise ValueError("CNR percentiles must satisfy 0 <= low < high <= 100.")
         rows = []
         for key in self.crops:
-            rows.extend(
-                {"pattern": key[0], "wavenumber": key[1], **r}
-                for r in compare_stage_cnr(self.stage_arrays(key), bg, target)
-            )
+            arrays = self.stage_arrays(key)
+            bounds = {name: self.stage_display_limits(arrays, name, low, high)
+                      for name, array in arrays.items() if array is not None}
+            # Preserve NaN/Inf so clipping cannot make an invalid pixel valid.
+            adjusted = {name: None if array is None else
+                        np.where(np.isfinite(array), np.clip(array, *bounds[name]), array)
+                        for name, array in arrays.items()}
+            original = {r["stage"]: r for r in compare_stage_cnr(arrays, bg, target)}
+            for r in compare_stage_cnr(adjusted, bg, target):
+                limits = bounds.get(r["stage"], (None, None))
+                rows.append({"pattern": key[0], "wavenumber": key[1], **r,
+                             "cnr_unadjusted": original[r["stage"]]["cnr"],
+                             "unadjusted_status": original[r["stage"]]["status"],
+                             "contrast_adjusted": low != 0 or high != 100,
+                             "contrast_low_percentile": low, "contrast_high_percentile": high,
+                             "contrast_vmin": limits[0], "contrast_vmax": limits[1],
+                             "contrast_method": "clip_to_display_limits"})
         self.cnr_records, self.cnr_rois = (
             rows,
             {"background": asdict(bg), "target": asdict(target)},
         )
         return {"records": rows, "rois": self.cnr_rois}
+
+    def stage_display_limits(self, arrays, kind, low, high):
+        signal = ("reflectance", "fourier", "rolling") if self.has_gold else ("raw", "fourier", "rolling")
+        group = signal if kind in signal else ("absorbance", "baseline") if kind in {"absorbance", "baseline"} else (kind,)
+        return self.limits([arrays[name] for name in group], low, high)
 
     @staticmethod
     def limits(arrays, low=0, high=100):
@@ -962,18 +1041,23 @@ class ProcessingState:
     def image(self, payload):
         self.require("configured")
         key = (payload["pattern"], integer(payload["wavenumber"], "Wavenumber"))
-        if key not in self.ref:
+        if key not in self.raw:
             raise ValueError("Choose a configured pattern and wavenumber.")
-        kind = payload.get("kind", "full_reflectance")
+        kind = payload.get("kind", "full_reflectance" if self.has_gold else "full_raw")
         low, high = float(payload.get("low", 0)), float(payload.get("high", 100))
         if not 0 <= low < high <= 100:
             raise ValueError("Display percentiles must satisfy 0 <= low < high <= 100.")
         extra = {}
         limits = None
         if kind == "full_reflectance":
+            if key not in self.ref:
+                return {"available": False, "reason": "Reflectance was not calculated. The processing input is raw intensity."}
             array = self.ref[key]
         elif kind == "full_raw":
             array = self.raw[key]
+            if self.has_gold and key in self.gold_pixels:
+                extra["gold_pixels"] = self.gold_pixels[key].tolist()
+                extra["i_goldref"] = float(array[self.gold_pixels[key][:, 0], self.gold_pixels[key][:, 1]].mean())
         elif kind == "spectrum":
             self.require("cropped")
             spectrum, fy, fx = fourier_spectrum(
@@ -1026,16 +1110,7 @@ class ProcessingState:
             array = arrays[kind]
             if array is None:
                 return {"available": False}
-            group = (
-                ("reflectance", "fourier", "rolling")
-                if kind in ("reflectance", "fourier", "rolling")
-                else (
-                    ("absorbance", "baseline")
-                    if kind in ("absorbance", "baseline")
-                    else (kind,)
-                )
-            )
-            limits = self.limits([arrays[k] for k in group], low, high)
+            limits = self.stage_display_limits(arrays, kind, low, high)
         if kind == "rolling" and payload.get("r0_method") in {
             "brightest",
             "darkest",
@@ -1051,19 +1126,16 @@ class ProcessingState:
             extra["reference_wavenumber"] = wn
             reference = array[pixels[:, 0], pixels[:, 1]]
             if not np.isfinite(reference).all() or (reference <= 0).any():
-                raise ValueError("Selected reference positions contain invalid reflectance in this band.")
+                raise ValueError("Selected reference positions contain invalid signal in this band.")
             extra["cell_free_pixels"] = pixels.tolist()
             extra["cell_free_r0"] = float(
                 np.mean(array[pixels[:, 0], pixels[:, 1]])
             )
-        png, lo, hi = render_data_png(
-            array,
+        png, lo, hi = render_processing_png(
+            array, payload,
             low=low,
             high=high,
             limits=limits,
-            brightest=self.n_pixels
-            if kind == "full_raw" and payload.get("brightest") == "true"
-            else 0,
         )
         return {
             "available": True,
@@ -1082,6 +1154,8 @@ class ProcessingState:
         kind = payload.get("kind", "baseline")
         if kind not in STAGES:
             raise ValueError("Unknown timelapse stage.")
+        if kind == "reflectance" and not self.has_gold:
+            raise ValueError("Reflectance was skipped; choose a raw-intensity stage.")
         start, end = int(payload.get("start", 0)), int(payload.get("end", 10**12))
         if start > end:
             raise ValueError("Start pattern must not exceed end pattern.")
@@ -1112,7 +1186,7 @@ class ProcessingState:
         low, high = float(payload.get("low", 0)), float(payload.get("high", 100))
         if not 0 <= low < high <= 100:
             raise ValueError("Contrast percentiles must satisfy 0 <= low < high <= 100.")
-        limits = self.limits(arrays, low, high)
+        limits = display_limits(self.limits(arrays, low, high), payload)
         for f, a in zip(frames, arrays):
             png, _, _ = render_data_png(a, limits=limits)
             f["png"] = base64.b64encode(png).decode()
@@ -1131,6 +1205,8 @@ class ProcessingState:
         else:
             extrema_label = "Data extrema: no finite values"
         self.last_video = {
+            "colorbar_zero": payload.get("colorbar_zero") in (True, "true", "1"),
+            "processing_basis": "reflectance" if self.has_gold else "raw_intensity",
             "extrema_label": extrema_label,
             "video_id": uuid.uuid4().hex,
             "version": self.version,
@@ -1154,6 +1230,10 @@ class ProcessingState:
         buffer = io.BytesIO()
         metadata = {
             "source": str(self.path),
+            "has_gold_patch_reference": self.has_gold,
+            "processing_basis": "reflectance" if self.has_gold else "raw_intensity",
+            "normalization_formula": "R = I_raw / mean(brightest N raw pixels per image)" if self.has_gold else None,
+            "absorbance_formula": "-log10(corrected signal / mean(analyte-free corrected signal))",
             "centers_and_references": self.mapping,
             "patterns": self.patterns,
             "processed_wavenumbers": self.bands,
@@ -1170,6 +1250,13 @@ class ProcessingState:
             "baseline_method": "pixelwise unweighted linear least squares; two references give interpolation",
             "cnr_rois": self.cnr_rois,
             "cnr_formula": "abs(mean(target)-mean(background))/std(background,ddof=1)",
+            "cnr_contrast": {
+                "method": "clip_to_display_limits; no RGB conversion or quantization",
+                "scope": "Percentiles apply to all selected patterns/bands; bounds match each stage's displayed shared scale.",
+                "default": "0–100: no clipping of finite values",
+                "interpretation": "Display-adjusted CNR; clipping can reduce background noise and inflate CNR.",
+                "records": self.cnr_records,
+            },
             "timestamp": datetime.now().astimezone().isoformat(),
             "flat_reference_levels": [
                 {"pattern": k[0], "wavenumber": k[1], "level": f.reference_level}
@@ -1193,6 +1280,10 @@ class ProcessingState:
             for key in self.crops:
                 folder = f"{key[0]}/{key[1]}cm-1"
                 arrays = self.stage_arrays(key)
+                if self.has_gold:
+                    gold_coordinates = io.StringIO()
+                    np.savetxt(gold_coordinates, self.gold_pixels[key], fmt="%d", delimiter=",", header="y_full_raw,x_full_raw", comments="")
+                    z.writestr(f"{folder}/gold_reference_pixels.csv", gold_coordinates.getvalue())
                 arrays.update(
                     {
                         "fourier_mask": self.ff[key].mask,
@@ -1373,6 +1464,7 @@ class Handler(BaseHTTPRequestHandler):
                 "/api/roi-spectrum-sg": session.smooth_roi_spectrum,
                 "/api/roi-spectrum-filter": session.filter_roi_spectrum,
                 "/api/configure": session.configure,
+                "/api/normalize": session.normalize,
                 "/api/crop": session.crop,
                 "/api/crop-preview": session.crop_plan,
                 "/api/process": session.process,

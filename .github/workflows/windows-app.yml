@@ -1,0 +1,42 @@
+name: Build Windows app
+on:
+  workflow_dispatch:
+  push:
+    branches: [build/windows-app]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - name: Create isolated build environment
+        shell: pwsh
+        run: python -m venv .venv-build
+      - name: Build and test the Windows EXE
+        shell: pwsh
+        run: ./packaging/build_windows.ps1
+      - name: Upload the tested application
+        uses: actions/upload-artifact@v4
+        with:
+          name: QCL-Processing-Windows-x64
+          path: |
+            dist/QCL-Processing-Windows-x64-*.zip
+            dist/QCL-Processing-Windows-x64-*.zip.sha256
+          if-no-files-found: error
+          retention-days: 30
+      - name: Upload diagnostic reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Windows-build-diagnostics
+          path: |
+            dist/windows-*/self-test.json
+            build/windows-*/windows/warn-windows.txt
+            ~/AppData/Local/QCL Processing/app.log
+          if-no-files-found: ignore

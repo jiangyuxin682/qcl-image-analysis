@@ -190,6 +190,7 @@ def configured(path):
             "n_pixels": 5,
         }
     )
+    state.normalize({"has_gold": True, "n_pixels": 5})
     return state
 
 
@@ -205,6 +206,141 @@ def complete(path):
     state.calculate({"roi": {"x_min": 0, "x_max": 3, "y_min": 0, "y_max": 3}})
     state.correct_baseline({})
     return state
+
+
+def test_configuration_requires_explicit_normalization_choice(acquisition):
+    state = ProcessingState()
+    state.discover({"path": str(acquisition)})
+    state.configure({"mapping": {"1658": [1601, 1702]}, "patterns": ["pattern0"]})
+    assert state.stage == "configured" and state.has_gold is None and not state.ref
+    with pytest.raises(ValueError):
+        state.crop({"roi": {"x_min": 0, "x_max": 5, "y_min": 0, "y_max": 5}})
+    with pytest.raises(ValueError, match="gold patch"):
+        state.normalize({})
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_no_gold_processes_raw_and_exports_no_reflectance(acquisition, enabled):
+    state = configured(acquisition)
+    state.normalize({"has_gold": False, "n_pixels": -100})
+    assert not state.ref and not state.gold_pixels
+    assert state.status()["processing_basis"] == "raw_intensity"
+    roi = {"x_min": 2, "x_max": 18, "y_min": 1, "y_max": 15}
+    with pytest.raises(ValueError, match="requires a gold"):
+        state.crop({"roi": roi, "drift": {"enabled": True}})
+    state.crop({"roi": roi})
+    parameters = {"fourier": {"enabled": enabled, "mode": "lowpass", "cutoff_x": .2, "cutoff_y": .1},
+                  "rolling": {"enabled": enabled, "radius": 3, "kernel_height": .05}}
+    state.process(parameters)
+    state.calculate({"roi": {"x_min": 0, "x_max": 3, "y_min": 0, "y_max": 3}})
+    for key, raw in state.raw.items():
+        cropped = raw[1:15, 2:18]
+        np.testing.assert_array_equal(state.crops[key], cropped)
+        _, expected = state.process_image(cropped, parameters)
+        np.testing.assert_allclose(state.flat[key].corrected, expected.corrected)
+        np.testing.assert_allclose(state.absorbance[key], -np.log10(expected.corrected / expected.corrected[:3, :3].mean()))
+        assert state.stage_arrays(key)["reflectance"] is None
+    state.correct_baseline({})
+    with zipfile.ZipFile(io.BytesIO(state.export())) as archive:
+        assert not any(name.endswith('/reflectance.csv') or name.endswith('/gold_reference_pixels.csv') for name in archive.namelist())
+        metadata = json.loads(archive.read('metadata.json'))
+        assert metadata['has_gold_patch_reference'] is False
+        assert metadata['normalization_formula'] is None
+    state.normalize({"has_gold": True, "n_pixels": 5})
+    assert state.stage == "referenced" and not state.crops and not state.absorbance
+
+
+def test_gold_preview_marks_exact_normalization_pixels(acquisition):
+    state = configured(acquisition)
+    for key, raw in state.raw.items():
+        pixels = state.gold_pixels[key]
+        assert pixels.shape == (5, 2)
+        mean = raw[pixels[:, 0], pixels[:, 1]].mean()
+        np.testing.assert_allclose(mean, np.sort(raw.ravel())[-5:].mean())
+        np.testing.assert_allclose(state.ref[key], raw / mean)
+        preview = state.image({"pattern": key[0], "wavenumber": key[1], "kind": "full_raw"})
+        assert preview['gold_pixels'] == pixels.tolist()
+        assert preview['i_goldref'] == mean
+    state.normalize({"has_gold": False})
+    assert not state.image({"pattern": key[0], "wavenumber": key[1], "kind": "full_reflectance"})['available']
+    assert 'gold_pixels' not in state.image({"pattern": key[0], "wavenumber": key[1], "kind": "full_raw"})
+
+
+def test_cnr_display_clipping_and_export_provenance(acquisition):
+    state = complete(acquisition)
+    rois = {"background": {"x_min": 0, "x_max": 3, "y_min": 0, "y_max": 3},
+            "target": {"x_min": 5, "x_max": 8, "y_min": 5, "y_max": 8}}
+    key = ('pattern0', 1658)
+    state.raw[key][1:4, 2:5] = [100, 104, 1000]
+    originals = {k: a.copy() for k, a in state.raw.items()}
+    default = state.cnr(rois)['records']
+    for row in default:
+        if np.isfinite(row['cnr']):
+            assert row['cnr'] == row['cnr_unadjusted']
+        assert not row['contrast_adjusted']
+    rows = state.cnr({**rois, 'low': 10, 'high': 80})['records']
+    raw = next(r for r in rows if (r['pattern'], r['wavenumber'], r['stage']) == (*key, 'raw'))
+    assert raw['cnr'] != pytest.approx(raw['cnr_unadjusted'])
+    for row in rows:
+        if row['status'] == 'unavailable':
+            continue
+        image = state.image({'pattern': row['pattern'], 'wavenumber': row['wavenumber'],
+                             'kind': row['stage'], 'low': 10, 'high': 80})
+        assert row['contrast_vmin'] == image['vmin']
+        assert row['contrast_vmax'] == image['vmax']
+    clipped = np.clip(state.stage_arrays(key)['raw'], raw['contrast_vmin'], raw['contrast_vmax'])
+    expected = abs(clipped[5:8, 5:8].mean() - clipped[:3, :3].mean()) / clipped[:3, :3].std(ddof=1)
+    assert raw['cnr'] == pytest.approx(expected)
+    for k, a in originals.items():
+        np.testing.assert_array_equal(state.raw[k], a)
+    with zipfile.ZipFile(io.BytesIO(state.export())) as archive:
+        metadata = json.loads(archive.read('metadata.json'))
+        assert all(r['contrast_low_percentile'] == 10 for r in metadata['cnr_contrast']['records'])
+        header = archive.read('cnr_summary.csv').decode().splitlines()[0]
+        for column in ['contrast_vmin', 'contrast_vmax', 'contrast_low_percentile', 'contrast_high_percentile', 'cnr_unadjusted']:
+            assert column in header
+    previous = state.cnr_records
+    for low, high in [(-1, 100), (80, 20), (0, 101), (float('nan'), 100)]:
+        with pytest.raises(ValueError, match='percentiles'):
+            state.cnr({**rois, 'low': low, 'high': high})
+        assert state.cnr_records is previous
+
+
+def test_zero_colorbar_is_display_only_across_renderers(acquisition):
+    state = complete(acquisition)
+    key = ('pattern0', 1658)
+    params = {'pattern': key[0], 'wavenumber': key[1], 'low': 10, 'high': 90}
+    rois = {'background': {'x_min': 0, 'x_max': 3, 'y_min': 0, 'y_max': 3},
+            'target': {'x_min': 5, 'x_max': 8, 'y_min': 5, 'y_max': 8}, 'low': 10, 'high': 90}
+    original_cnr = clean_json(state.cnr(rois))
+    arrays = {k: a.copy() for k, a in state.stage_arrays(key).items() if a is not None}
+    before = state.image({**params, 'kind': 'raw'})
+    after = state.image({**params, 'kind': 'raw', 'colorbar_zero': 'true'})
+    assert after['vmin'] == 0 and after['vmax'] == before['vmax']
+    assert after['png'] != before['png']
+    for kind in ['full_raw', 'full_reflectance', 'raw', 'reflectance', 'fourier', 'rolling', 'absorbance', 'baseline', 'spectrum', 'mask', 'background', 'gain', 'linear_baseline']:
+        assert state.image({**params, 'kind': kind, 'colorbar_zero': True})['vmin'] == 0
+    assert state.raw_inspection({**params, 'mode': 'image', 'colorbar_zero': True})['vmin'] == 0
+    preview = state.preview({**params, **state.parameters, 'colorbar_zero': True})
+    for card in preview['images'] + preview['diagnostics']:
+        if 'vmin' in card:
+            assert card['vmin'] == 0
+    normal = state.preview({**params, **state.parameters})
+    selected_title = 'After Fourier'
+    independent = state.preview({**params, **state.parameters, 'colorbar_zero_titles': [selected_title]})
+    for before_card, after_card in zip(normal['images'] + normal['diagnostics'], independent['images'] + independent['diagnostics']):
+        if before_card['title'] == selected_title:
+            assert after_card['vmin'] == 0
+            assert after_card['png'] != before_card['png']
+        else:
+            assert after_card == before_card
+    video = state.timelapse({'wavenumber': 1658, 'colorbar_zero': True})
+    assert video['vmin'] == 0 and video['colorbar_zero'] is True
+    assert clean_json(state.cnr({**rois, 'colorbar_zero': True})) == original_cnr
+    for kind, array in arrays.items():
+        np.testing.assert_array_equal(state.stage_arrays(key)[kind], array)
+    restored = state.image({**params, 'kind': 'raw', 'colorbar_zero': 'false'})
+    assert restored['png'] == before['png']
 
 
 def test_discovery_paths(acquisition):
