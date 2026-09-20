@@ -16,7 +16,7 @@ if errorlevel 1 goto :failed
 ".venv\Scripts\python.exe" -m pip install -e ".[ui]"
 if errorlevel 1 goto :failed
 
-echo Setup complete. You can now run ui\launch_windows.bat.
+echo Setup complete. You can now run ui\launch_processing_windows.bat.
 pause
 exit /b 0
 

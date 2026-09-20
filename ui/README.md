@@ -1,4 +1,9 @@
-# QCL Image Workbench
+# Original QCL Image Workbench (legacy)
+
+For new analyses, use the current ten-section **Processing Workbench** on port
+8766: [quick start](QUICKSTART.md) · [processing reference](README_PROCESSING.md).
+This page documents the original `ui/app.py` on port 8765, including its separate
+on-MS/out-MS workflow. Its result ZIPs are not the current reproducible project format.
 
 A local, browser-based UI for the `03_raw_to_absorbance.ipynb` workflow. It
 uses the existing `qcl_analysis` package for indexing, QC, reflectance, cropping,

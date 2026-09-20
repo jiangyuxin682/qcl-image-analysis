@@ -843,3 +843,94 @@ def test_roi_notch_rejects_invalid_settings(override):
         ProcessingState().filter_roi_spectrum({'wavenumbers': list(range(9)),
             'absorbance': [1]*9, 'fourier_enabled': True, 'fourier_mode': 'notch',
             'notch_centers': [.25], 'notch_width': .02, **override})
+
+
+@pytest.mark.parametrize('method', ['roi', 'brightest', 'darkest'])
+def test_cnr_reuses_committed_analyte_free_selection(acquisition, method):
+    state = complete(acquisition)
+    roi = {'x_min': 0, 'x_max': 4, 'y_min': 0, 'y_max': 4}
+    selection = {'method': method, 'roi': roi, 'search_roi': roi, 'count': 5,
+                 'reference_bands': {'pattern0': 1601, 'pattern1': 1702}}
+    state.calculate(selection)
+    saved = {key: pixels.copy() for key, pixels in state.r0_pixels.items()}
+    state.correct_baseline({})
+    target = {'x_min': 8, 'x_max': 11, 'y_min': 8, 'y_max': 11}
+    result = state.cnr({'background_source': 'analyte_free', 'target': target})
+    for row in result['records']:
+        key = (row['pattern'], row['wavenumber'])
+        pixels = saved[key]
+        array = state.stage_arrays(key)[row['stage']]
+        if array is None:
+            continue
+        bg = array[pixels[:, 0], pixels[:, 1]]
+        assert row['background_mean'] == pytest.approx(bg.mean())
+        assert row['background_std'] == pytest.approx(bg.std(ddof=1))
+        assert row['background_pixels'] == len(pixels)
+        assert row['background_source'] == 'analyte_free'
+    for key, pixels in saved.items():
+        image = state.image({'pattern': key[0], 'wavenumber': key[1],
+                             'kind': 'raw', 'cnr_background_source': 'analyte_free'})
+        if method == 'roi':
+            assert image['analyte_free_roi'] == roi
+        else:
+            assert image['cell_free_pixels'] == pixels.tolist()
+    # Percentile recalculation (also used by multi-folder comparison) retains source.
+    assert state.cnr({**result['rois'], 'low': 5, 'high': 95})['rois'] == result['rois']
+    with zipfile.ZipFile(io.BytesIO(state.export())) as archive:
+        metadata = json.loads(archive.read('metadata.json'))
+        assert metadata['cnr_rois']['background_source'] == 'analyte_free'
+    y, x = saved[('pattern0', 1658)][0]
+    with pytest.raises(ValueError, match='overlap'):
+        state.cnr({'background_source': 'analyte_free', 'target': {
+            'x_min': int(x), 'x_max': int(x + 1), 'y_min': int(y), 'y_max': int(y + 1)}})
+    manual = {'x_min': 4, 'x_max': 7, 'y_min': 4, 'y_max': 7}
+    assert state.cnr({'background': manual, 'target': target})['rois']['background_source'] == 'manual'
+    state.clear_absorbance()
+    assert not state.r0_pixels
+
+
+def test_line_profile_uses_stage_values_and_shared_positions(acquisition):
+    state = complete(acquisition)
+    key = ('pattern0', 1658)
+    payload = {'pattern': key[0], 'wavenumber': key[1],
+               'start': {'x': 1, 'y': 2}, 'end': {'x': 8, 'y': 2}}
+    result = state.line_profile(payload)
+    np.testing.assert_allclose(result['distance'], np.arange(8))
+    for stage, array in state.stage_arrays(key).items():
+        np.testing.assert_allclose(result['profiles'][stage], array[2, 1:9])
+    assert result == state.line_profile({**payload, 'low': 30, 'high': 50, 'colorbar_zero': True})
+    assert state.stage == 'complete' and not state.cnr_records
+    reverse = state.line_profile({**payload, 'start': payload['end'], 'end': payload['start']})
+    for stage in result['profiles']:
+        np.testing.assert_allclose(reverse['profiles'][stage], result['profiles'][stage][::-1])
+    reference = state.line_profile({**payload, 'wavenumber': 1601})
+    assert reference['profiles']['baseline'] is None
+
+
+def test_line_profile_diagonal_interpolation_and_invalid_samples(acquisition, monkeypatch):
+    state = complete(acquisition)
+    yy, xx = np.indices((14, 16))
+    plane = 2.0 * xx + 3.0 * yy
+    monkeypatch.setattr(state, 'stage_arrays', lambda key: {'raw': plane, 'reflectance': None})
+    payload = {'pattern': 'pattern0', 'wavenumber': 1658,
+               'start': {'x': 0, 'y': 0}, 'end': {'x': 15, 'y': 13}}
+    result = state.line_profile(payload)
+    np.testing.assert_allclose(result['profiles']['raw'], 2*np.array(result['x'])+3*np.array(result['y']))
+    assert result['distance'][-1] == pytest.approx(np.hypot(15, 13))
+    assert result['profiles']['reflectance'] is None
+    plane[0, 1] = np.nan
+    row = state.line_profile({**payload, 'end': {'x': 3, 'y': 0}})
+    assert row['profiles']['raw'][0] == 0  # Zero-weight invalid neighbors do not contaminate pixels.
+    assert clean_json(row)['profiles']['raw'][1] is None
+    assert row['profiles']['raw'][2] == 4
+    json.dumps(clean_json(row), allow_nan=False)
+
+
+@pytest.mark.parametrize('end', [{'x': 16, 'y': 0}, {'x': -1, 'y': 0},
+                                {'x': 0, 'y': 14}, {'x': float('nan'), 'y': 0},
+                                {'x': 0, 'y': 0}])
+def test_line_profile_rejects_invalid_endpoints(acquisition, end):
+    state = complete(acquisition)
+    with pytest.raises(ValueError, match='endpoints'):
+        state.line_profile({'pattern': 'pattern0', 'wavenumber': 1658,
+                            'start': {'x': 0, 'y': 0}, 'end': end})

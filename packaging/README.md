@@ -7,6 +7,19 @@ The EXE starts a small native controller and opens the existing processing UI
 in the default browser. Use **Quit** in the controller to stop the application;
 export results before quitting. Analysis sessions are held in memory.
 
+## Using the workbench
+
+Follow the [new-user quick start](../ui/QUICKSTART.md) for file-chooser imports,
+the ten processing sections, multi-folder comparison, and exporting/reproducing
+projects. The [processing reference](../ui/README_PROCESSING.md) explains the
+numerical controls and verification report.
+
+The **application distribution ZIP** contains the executable and must be extracted
+to launch the app. A **processing project ZIP** is created inside the app by
+Section 10 (or Export all datasets); import it with the processing ZIP chooser
+to reproduce an analysis. These are different files. Updating the source does
+not update an existing EXE: build a new Windows distribution for new features.
+
 ## Build on Windows
 
 The builder needs Windows x64, Python 3.12 x64 with the `py` launcher, this entire

@@ -20,5 +20,5 @@ fi
 .venv/bin/python -m pip install --upgrade pip
 .venv/bin/python -m pip install -e ".[ui]"
 
-echo "Setup complete. You can now run ui/launch_macos.command."
+echo "Setup complete. You can now run ui/launch_processing_macos.command."
 read -r "?Press Return to close."

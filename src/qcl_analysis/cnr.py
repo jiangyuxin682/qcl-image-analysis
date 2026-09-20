@@ -45,14 +45,17 @@ def _array(image: ArrayLike) -> np.ndarray:
 
 def calculate_roi_cnr(
     image: ArrayLike,
-    background_roi: ROI,
+    background_roi: ROI | None,
     target_roi: ROI,
     *,
     valid_mask: ArrayLike | None = None,
+    background_mask: ArrayLike | None = None,
 ) -> CNRResult:
     """Compute target/background CNR without changing or rescaling the image.
 
-    Both rectangles use half-open image coordinates and must not overlap.
+    Rectangles use half-open image coordinates. An optional background_mask
+    replaces the background rectangle with exact selected pixels. Background
+    and target selections must not overlap.
     Nonfinite values are excluded; an optional boolean mask further restricts
     sampling. At least two background pixels and one target pixel are needed.
     A zero or numerically negligible background standard deviation gives NaN
@@ -60,14 +63,18 @@ def calculate_roi_cnr(
     The signed contrast is retained alongside the nonnegative CNR magnitude.
     """
     array = _array(image)
-    validate_roi(array, background_roi)
     validate_roi(array, target_roi)
-    if not (
-        background_roi.x_max <= target_roi.x_min
-        or target_roi.x_max <= background_roi.x_min
-        or background_roi.y_max <= target_roi.y_min
-        or target_roi.y_max <= background_roi.y_min
-    ):
+    target_selection = np.zeros(array.shape, dtype=bool)
+    target_selection[target_roi.as_slices()] = True
+    if background_mask is None:
+        validate_roi(array, background_roi)
+        background_selection = np.zeros(array.shape, dtype=bool)
+        background_selection[background_roi.as_slices()] = True
+    else:
+        background_selection = np.asarray(background_mask)
+        if background_selection.shape != array.shape or background_selection.dtype != np.bool_:
+            raise ValueError("background_mask must be boolean and match the image shape.")
+    if np.any(background_selection & target_selection):
         raise ValueError("Background and target ROIs must not overlap.")
     valid = np.isfinite(array)
     if valid_mask is not None:
@@ -75,9 +82,9 @@ def calculate_roi_cnr(
         if mask.shape != array.shape or mask.dtype != np.bool_:
             raise ValueError("valid_mask must be boolean and match the image shape.")
         valid &= mask
-    bg_all = array[background_roi.as_slices()]
+    bg_all = array[background_selection]
     target_all = array[target_roi.as_slices()]
-    bg = bg_all[valid[background_roi.as_slices()]]
+    bg = bg_all[valid[background_selection]]
     target = target_all[valid[target_roi.as_slices()]]
     bg_mean = float(bg.mean()) if bg.size else np.nan
     target_mean = float(target.mean()) if target.size else np.nan
@@ -104,10 +111,12 @@ def calculate_roi_cnr(
 
 def compare_stage_cnr(
     stages: Mapping[str, ArrayLike | None],
-    background_roi: ROI,
+    background_roi: ROI | None,
     target_roi: ROI,
+    *,
+    background_mask: ArrayLike | None = None,
 ) -> list[dict]:
-    """Measure stages on identical finite pixels with the same two rectangles.
+    """Measure stages on identical finite pixels with shared spatial selections.
 
     Available stages must have identical shapes. The common validity mask is
     the intersection across all available stages, applied separately within
@@ -128,6 +137,7 @@ def compare_stage_cnr(
         else:
             record = asdict(calculate_roi_cnr(
                 available[name], background_roi, target_roi, valid_mask=common,
+                background_mask=background_mask,
             ))
         records.append({"stage": name, **record})
     return records

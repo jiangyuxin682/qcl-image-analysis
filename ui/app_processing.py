@@ -22,17 +22,17 @@ import math
 import os
 import re
 import sys
-import threading
 import tempfile
+import threading
 import time
+import uuid
 import webbrowser
 import zipfile
-import uuid
 from dataclasses import asdict
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -64,6 +64,14 @@ from qcl_analysis.qc import add_frame_quality_flags, add_reference_quality_flags
 from qcl_analysis.reflectance import get_brightest_pixel_indices
 from qcl_analysis.roi import ROI
 from ui.app import render_data_png
+from ui.reproduction import (
+    MAX_UPLOAD,
+    coordinates,
+    reproduce,
+    resolved_parameters,
+    write_project,
+)
+from ui.uploads import raw_upload, zip_filename
 from ui.video_export import encode_video
 
 
@@ -223,6 +231,9 @@ class ProcessingState:
         self.progress_lock = threading.Lock()
         self.progress = {"status": "idle", "completed": 0, "total": 0}
         self.last_video = None
+        self._uploaded_inputs = None
+        self._reproduction_inputs = None
+        self.import_name = None
         self.dataset = None
         self.path = None
         self.version = 0
@@ -253,6 +264,7 @@ class ProcessingState:
         self.clear_absorbance()
 
     def clear_absorbance(self):
+        self.reproduction_report = None
         self.r0_roi = None
         self.r0_selection = {"method": "roi"}
         self.r0_pixels = {}
@@ -296,16 +308,15 @@ class ProcessingState:
         self.path, self.dataset = path, dataset
         self.stage = "discovered"
         self.version += 1
-        return {
-            **self.status(),
-            "path": str(path),
-            "files": len(dataset),
-            "wavenumbers": sorted(int(v) for v in dataset.wavenumber.unique()),
-            "availability": [
-                {"pattern": p, "wavenumbers": sorted(int(x) for x in g.wavenumber)}
-                for p, g in dataset.groupby("pattern", sort=False)
-            ],
-        }
+        return self.discovery_state()
+
+    def discovery_state(self):
+        dataset = self.dataset
+        return {**self.status(), "path": str(self.path), "name": self.import_name,
+                "files": len(dataset),
+                "wavenumbers": sorted(int(v) for v in dataset.wavenumber.unique()),
+                "availability": [{"pattern": p, "wavenumbers": sorted(int(x) for x in g.wavenumber)}
+                                 for p, g in dataset.groupby("pattern", sort=False)]}
 
     def raw_inspection(self, payload):
         """Read full-image raw spectra before selecting processing bands or ROIs."""
@@ -514,7 +525,7 @@ class ProcessingState:
             "qc": selected.drop(columns="path").to_dict(orient="records"),
         }
 
-    def normalize(self, payload):
+    def normalize(self, payload, *, saved_pixels=None):
         """Commit either per-image gold normalization or the unchanged raw path."""
         self.require("configured")
         has_gold = payload.get("has_gold")
@@ -527,7 +538,12 @@ class ProcessingState:
         if has_gold:
             for row in selected.itertuples(index=False):
                 key = (row.pattern, int(row.wavenumber))
-                yy, xx, values = get_brightest_pixel_indices(self.raw[key], n_pixels)
+                if saved_pixels is None:
+                    yy, xx, values = get_brightest_pixel_indices(self.raw[key], n_pixels)
+                else:
+                    selected_pixels = coordinates(saved_pixels[key], self.raw[key].shape, n_pixels)
+                    yy, xx = selected_pixels.T
+                    values = self.raw[key][yy, xx]
                 gold = float(np.mean(values))
                 if not np.isfinite(gold) or gold <= 0:
                     raise ValueError("Gold-reference signal must be finite and positive.")
@@ -827,7 +843,7 @@ class ProcessingState:
             self.progress.update(values)
 
     def process(self, payload):
-        self.set_progress(status="running", completed=0, total=len(self.crops),
+        self.set_progress(status="running", unit="files", completed=0, total=len(self.crops),
                           pattern=None, wavenumber=None, started=time.monotonic(), ended=None)
         try:
             result = self._process_batch(payload)
@@ -839,6 +855,7 @@ class ProcessingState:
 
     def _process_batch(self, payload):
         self.require("cropped")
+        payload = resolved_parameters(payload)
         f, r = payload["fourier"], payload["rolling"]
         ff, flat = {}, {}
         for index, (key, image) in enumerate(self.crops.items()):
@@ -863,7 +880,7 @@ class ProcessingState:
             ],
         }
 
-    def calculate(self, payload):
+    def calculate(self, payload, *, saved_pixels=None):
         self.require("processed")
         method = payload.get("method", "roi")
         if method not in {"roi", "brightest", "darkest"}:
@@ -882,9 +899,13 @@ class ProcessingState:
                 if (pattern, wn) not in self.flat:
                     raise ValueError(f"Choose a processed reference wavenumber for {pattern}.")
                 reference_bands[pattern] = wn
-                pattern_pixels[pattern] = select_cell_free_pixels(
-                    self.flat[(pattern, wn)].corrected, method, count, search_roi
-                )
+                if saved_pixels is None:
+                    pattern_pixels[pattern] = select_cell_free_pixels(
+                        self.flat[(pattern, wn)].corrected, method, count, search_roi
+                    )
+                else:
+                    pattern_pixels[pattern] = coordinates(saved_pixels[(pattern, wn)],
+                                                          self.flat[(pattern, wn)].corrected.shape, count)
         for key, flat in self.flat.items():
             if method == "roi":
                 reference = crop_image(flat.corrected, roi)
@@ -892,6 +913,17 @@ class ProcessingState:
                 pixels = np.column_stack((yy.ravel(), xx.ravel()))
             else:
                 pixels = pattern_pixels[key[0]]
+                reference = flat.corrected[pixels[:, 0], pixels[:, 1]]
+            if saved_pixels is not None:
+                restored = coordinates(saved_pixels[key], flat.corrected.shape, len(pixels))
+                if not np.array_equal(restored, pixels):
+                    raise ValueError("Saved analyte-free coordinates disagree across bands or with the ROI.")
+                pixels = restored
+                if search_roi is not None:
+                    crop_image(flat.corrected, search_roi)
+                    if not ((pixels[:, 0] >= search_roi.y_min) & (pixels[:, 0] < search_roi.y_max)
+                            & (pixels[:, 1] >= search_roi.x_min) & (pixels[:, 1] < search_roi.x_max)).all():
+                        raise ValueError("Saved analyte-free pixels fall outside the search ROI.")
                 reference = flat.corrected[pixels[:, 0], pixels[:, 1]]
             if not np.isfinite(reference).all() or (reference <= 0).any():
                 raise ValueError(
@@ -943,6 +975,7 @@ class ProcessingState:
                 {(pattern, int(wn)): result for wn, result in results.items()}
             )
         self.baselines = baselines
+        self.reproduction_report = None
         self.cnr_records, self.cnr_rois = [], None
         self.stage = "complete"
         self.version += 1
@@ -994,25 +1027,81 @@ class ProcessingState:
             else None,
         }
 
+    def line_profile(self, payload):
+        """Sample committed stage arrays along one crop-local line, without clipping."""
+        self.require("complete")
+        key = (payload["pattern"], integer(payload["wavenumber"], "Wavenumber"))
+        if key not in self.crops:
+            raise ValueError("Choose a processed pattern and wavenumber.")
+        height, width = self.crops[key].shape
+        points = []
+        for name in ("start", "end"):
+            point = payload[name]
+            x, y = float(point["x"]), float(point["y"])
+            if not (np.isfinite(x) and np.isfinite(y) and 0 <= x <= width - 1 and 0 <= y <= height - 1):
+                raise ValueError("Line endpoints must lie inside the cropped image.")
+            points.append((x, y))
+        start, end = np.asarray(points)
+        length = float(np.linalg.norm(end - start))
+        if length == 0:
+            raise ValueError("Choose two different line endpoints.")
+        distance = np.linspace(0, length, int(np.ceil(length)) + 1)
+        xy = start + (end - start) * (distance / length)[:, None]
+        x, y = xy.T
+        x0, y0 = np.floor(x).astype(int), np.floor(y).astype(int)
+        x1, y1 = np.minimum(x0 + 1, width - 1), np.minimum(y0 + 1, height - 1)
+        dx, dy = x - x0, y - y0
+        profiles = {}
+        for name, array in self.stage_arrays(key).items():
+            if array is None:
+                profiles[name] = None
+                continue
+            values = np.zeros(distance.shape)
+            valid = np.ones(distance.shape, dtype=bool)
+            for yy, xx, weight in ((y0, x0, (1-dx)*(1-dy)), (y0, x1, dx*(1-dy)),
+                                   (y1, x0, (1-dx)*dy), (y1, x1, dx*dy)):
+                contributing = weight > 0
+                samples = array[yy, xx]
+                valid &= ~contributing | np.isfinite(samples)
+                values += np.where(contributing & np.isfinite(samples), samples, 0) * weight
+            values[~valid] = np.nan
+            profiles[name] = values.tolist()
+        return {"pattern": key[0], "wavenumber": key[1], "start": payload["start"],
+                "end": payload["end"], "distance": distance.tolist(),
+                "x": x.tolist(), "y": y.tolist(), "profiles": profiles,
+                "sampling": "bilinear", "position_unit": "pixels"}
+
     def cnr(self, payload):
         self.require("complete")
-        bg, target = roi_from(payload["background"]), roi_from(payload["target"])
+        source = payload.get("background_source", "manual")
+        if source not in {"manual", "analyte_free"}:
+            raise ValueError("Unknown CNR background source.")
+        reuse = source == "analyte_free"
+        bg = self.r0_roi if reuse else roi_from(payload["background"])
+        target = roi_from(payload["target"])
         low, high = float(payload.get("low", 0)), float(payload.get("high", 100))
         if not 0 <= low < high <= 100:
             raise ValueError("CNR percentiles must satisfy 0 <= low < high <= 100.")
         rows = []
         for key in self.crops:
             arrays = self.stage_arrays(key)
+            background_mask = None
+            if reuse:
+                pixels = self.r0_pixels.get(key)
+                if pixels is None:
+                    raise ValueError("Calculate absorbance to save the analyte-free selection first.")
+                background_mask = np.zeros(self.crops[key].shape, dtype=bool)
+                background_mask[pixels[:, 0], pixels[:, 1]] = True
             bounds = {name: self.stage_display_limits(arrays, name, low, high)
                       for name, array in arrays.items() if array is not None}
             # Preserve NaN/Inf so clipping cannot make an invalid pixel valid.
             adjusted = {name: None if array is None else
                         np.where(np.isfinite(array), np.clip(array, *bounds[name]), array)
                         for name, array in arrays.items()}
-            original = {r["stage"]: r for r in compare_stage_cnr(arrays, bg, target)}
-            for r in compare_stage_cnr(adjusted, bg, target):
+            original = {r["stage"]: r for r in compare_stage_cnr(arrays, bg, target, background_mask=background_mask)}
+            for r in compare_stage_cnr(adjusted, bg, target, background_mask=background_mask):
                 limits = bounds.get(r["stage"], (None, None))
-                rows.append({"pattern": key[0], "wavenumber": key[1], **r,
+                rows.append({"pattern": key[0], "wavenumber": key[1], **r, "background_source": source,
                              "cnr_unadjusted": original[r["stage"]]["cnr"],
                              "unadjusted_status": original[r["stage"]]["status"],
                              "contrast_adjusted": low != 0 or high != 100,
@@ -1021,8 +1110,10 @@ class ProcessingState:
                              "contrast_method": "clip_to_display_limits"})
         self.cnr_records, self.cnr_rois = (
             rows,
-            {"background": asdict(bg), "target": asdict(target)},
+            {"background": asdict(bg) if bg else None, "target": asdict(target),
+             "background_source": source},
         )
+        self.reproduction_report = None
         return {"records": rows, "rois": self.cnr_rois}
 
     def stage_display_limits(self, arrays, kind, low, high):
@@ -1111,6 +1202,12 @@ class ProcessingState:
             if array is None:
                 return {"available": False}
             limits = self.stage_display_limits(arrays, kind, low, high)
+        if payload.get("cnr_background_source") == "analyte_free":
+            self.require("absorbed")
+            if self.r0_roi is not None:
+                extra["analyte_free_roi"] = asdict(self.r0_roi)
+            else:
+                extra["cell_free_pixels"] = self.r0_pixels[key].tolist()
         if kind == "rolling" and payload.get("r0_method") in {
             "brightest",
             "darkest",
@@ -1225,6 +1322,39 @@ class ProcessingState:
         }
         return self.last_video
 
+    def restore_project(self, data):
+        """Recompute in isolation, then atomically replace the current session."""
+        self.set_progress(status="Starting reproduction", unit="steps", completed=0, total=7,
+                          started=time.monotonic(), ended=None)
+        try:
+            restored, _report = reproduce(data, self.set_progress)
+        except Exception:
+            self.set_progress(status="Reproduction failed", ended=time.monotonic())
+            raise
+        self.adopt(restored)
+        self.set_progress(status="Reproduction complete", completed=7, total=7, ended=time.monotonic())
+        return self.restored_state()
+
+    def adopt(self, other):
+        old_inputs = [getattr(self, key, None) for key in ("_reproduction_inputs", "_uploaded_inputs")]
+        version = self.version + 1
+        for key, value in other.__dict__.items():
+            if key not in {"lock", "progress_lock", "progress", "version"}:
+                setattr(self, key, value)
+        self.version = version
+        for work in old_inputs:
+            if work is not None:
+                work.cleanup()
+
+    def restored_state(self):
+        return {**self.status(), "path": str(self.path), "qc": self.qc.drop(columns="path").to_dict(orient="records"),
+                "r0": self.r0_records, "cnr": self.cnr_records, "cnr_rois": self.cnr_rois,
+                "parameters": self.parameters, "n_pixels": self.n_pixels, "qc_settings": self.qc_settings,
+                "drift": self.drift, "on_rois": {p: asdict(r) for p, r in self.on_rois.items()},
+                "report": self.reproduction_report,
+                "discovery": {"wavenumbers": self.bands, "files": len(self.raw),
+                              "availability": [{"pattern": p, "wavenumbers": self.bands} for p in self.patterns]}}
+
     def export(self):
         self.require("complete")
         buffer = io.BytesIO()
@@ -1317,6 +1447,7 @@ class ProcessingState:
                         output = io.StringIO()
                         np.savetxt(output, array, delimiter=",")
                         z.writestr(f"{folder}/{name}.csv", output.getvalue())
+            write_project(z, self, metadata, clean_json)
         return buffer.getvalue()
 
 
@@ -1346,6 +1477,29 @@ class ComparisonSession:
             self.datasets[dataset_id] = dataset
             self.names[dataset_id] = name
         return {"id": dataset_id, "name": name, "path": str(dataset.path), "discovery": discovered}
+
+    def register(self, dataset, name):
+        dataset_id = uuid.uuid4().hex
+        with self.lock:
+            self.datasets[dataset_id] = dataset
+            self.names[dataset_id] = name or "Imported dataset"
+        return {"id": dataset_id, "name": self.names[dataset_id], "path": str(dataset.path),
+                "reproduced": dataset.stage == "complete"}
+
+    def import_projects(self, data, name=""):
+        from ui.reproduction import project_members
+        ready = []
+        try:
+            for label, package in project_members(data, name):
+                dataset, _report = reproduce(package)
+                ready.append((dataset, label))
+        except Exception:
+            for dataset, _ in ready:
+                dataset._reproduction_inputs.cleanup()
+            raise
+        # Register only after every dataset in the bundle has reproduced successfully.
+        with self.lock:
+            return {"datasets": [self.register(dataset, label) for dataset, label in ready]}
 
     def info(self, ids):
         result = []
@@ -1400,6 +1554,8 @@ class Handler(BaseHTTPRequestHandler):
             "/styles.css": ("styles.css", "text/css; charset=utf-8"),
             "/compare": ("compare.html", "text/html; charset=utf-8"),
             "/compare.js": ("compare.js", "text/javascript; charset=utf-8"),
+            "/line_profile.js": ("line_profile.js", "text/javascript; charset=utf-8"),
+            "/uploads.js": ("uploads.js", "text/javascript; charset=utf-8"),
         }
         try:
             if url.path in assets:
@@ -1416,6 +1572,11 @@ class Handler(BaseHTTPRequestHandler):
             with session.lock:
                 if url.path == "/api/status":
                     return self.json(session.status())
+                if url.path == "/api/bootstrap":
+                    if session.stage == "complete":
+                        return self.json({"kind": "reproduced", "state": session.restored_state()})
+                    session.require("discovered")
+                    return self.json({"kind": "raw", "state": session.discovery_state()})
                 if url.path == "/api/image":
                     return self.json(
                         session.image({k: v[0] for k, v in parse_qs(url.query).items()})
@@ -1426,7 +1587,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_header("Content-Type", "application/zip")
                     self.send_header(
                         "Content-Disposition",
-                        'attachment; filename="qcl-processing.zip"',
+                        'attachment; filename="qcl-processing.zip"; filename*=UTF-8\'\'' + quote(zip_filename(query.get('filename')), safe=''),
                     )
                     self.send_header("Content-Length", str(len(data)))
                     self.end_headers()
@@ -1443,6 +1604,27 @@ class Handler(BaseHTTPRequestHandler):
             return self.json({"error": "Cross-origin request rejected."}, 403)
         try:
             length = int(self.headers.get("Content-Length", 0))
+            url = urlparse(self.path)
+            if url.path in {"/api/reproduce", "/api/upload-data", "/api/datasets/upload", "/api/datasets/reproduce"}:
+                if not 0 < length <= MAX_UPLOAD:
+                    raise ValueError("Selected upload must be no larger than 1 GiB.")
+                data = self.rfile.read(length)
+                if len(data) != length:
+                    raise ValueError("Incomplete file upload.")
+                if url.path == "/api/datasets/reproduce":
+                    name = parse_qs(url.query).get("name", [""])[0]
+                    return self.json(COMPARISON.import_projects(data, name))
+                if url.path in {"/api/upload-data", "/api/datasets/upload"}:
+                    imported, _discovered = raw_upload(data, self.headers.get("Content-Type", ""))
+                    if url.path == "/api/datasets/upload":
+                        return self.json(COMPARISON.register(imported, imported.import_name))
+                    session = COMPARISON.get(parse_qs(url.query).get("dataset", ["default"])[0])
+                    with session.lock:
+                        session.adopt(imported)
+                        return self.json(session.discovery_state())
+                session = COMPARISON.get(parse_qs(url.query).get("dataset", ["default"])[0])
+                with session.lock:
+                    return self.json(session.restore_project(data))
             if not 0 < length <= 1_000_000:
                 raise ValueError("Invalid request size.")
             payload = json.loads(self.rfile.read(length))
@@ -1472,6 +1654,7 @@ class Handler(BaseHTTPRequestHandler):
                 "/api/calculate": session.calculate,
                 "/api/baseline": session.correct_baseline,
                 "/api/cnr": session.cnr,
+                "/api/line-profile": session.line_profile,
                 "/api/baseline-pixel": session.baseline_pixel,
                 "/api/timelapse": session.timelapse,
             }
@@ -1479,7 +1662,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json({"error": "Not found"}, 404)
             with session.lock:
                 self.json(routes[url.path](payload))
-        except (ValueError, KeyError, RuntimeError, OSError, TypeError) as exc:
+        except (ValueError, KeyError, RuntimeError, OSError, TypeError, zipfile.BadZipFile, EOFError, IndexError, AttributeError) as exc:
             self.json({"error": str(exc)}, 400)
 
 

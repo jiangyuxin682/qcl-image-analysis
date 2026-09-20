@@ -1,109 +1,100 @@
 # QCL Image Analysis
 
-Python tools and a local browser interface for processing QCL microscopy
-images from raw MCT intensity to reflectance and absorbance.
+Local tools for processing QCL microscopy images, comparing datasets, and
+exporting self-contained processing projects that can be reproduced later.
+Images and processing remain on your computer; the browser connects to a local
+server, not a hosted service.
 
-## Processing model
+## Start here
 
-The current workflow follows:
+The current **QCL Processing Workbench** is `ui/app_processing.py`, with ten
+sections from import to export.
 
-```text
-I_raw -> I_goldref -> R -> on-MS / out-MS -> R0 -> A
-```
+- **[New-user quick start](ui/QUICKSTART.md)** — installation, first dataset,
+  comparison, saving and reopening a project, and troubleshooting.
+- **[Processing reference](ui/README_PROCESSING.md)** — scientific parameters,
+  selection rules, CNR, line profiles, and reproduction details.
+- **[Windows desktop distribution](packaging/README.md)** — using and building
+  the standalone application, which requires no Python installation.
 
-where each pattern and wavenumber receives its own gold-reference signal and
-its own region-specific reference reflectance. Absorbance is calculated as:
+### Run from source
 
-```text
-A = -log10(R / R0)
-```
+Python **3.12** is required. From a complete checkout:
 
-The on-MS and out-MS regions are normalized independently.
+| Platform | First-time setup | Start the current workbench |
+| --- | --- | --- |
+| macOS | `ui/setup_macos.command` | `ui/launch_processing_macos.command` |
+| Windows | `ui/setup_windows.bat` | `ui/launch_processing_windows.bat` |
 
-## Project layout
-
-- `src/qcl_analysis/`: reusable image-processing functions.
-- `notebooks/`: step-by-step exploration and validation notebooks.
-- `ui/`: local QCL Image Workbench and cross-platform launchers.
-- `tests/`: automated tests for processing and UI helpers.
-
-## QCL Image Workbench
-
-### Current Processing UI and Windows app
-
-For an independent synthetic-image and Fourier-filter experiment interface,
-run `python ui/app_fourier_lab.py` (port 8767). It supports constant-width letters
-with square/rounded corners, noise, imported images, interactive notch selection,
-and before/after spectra. See [Fourier Image Lab](ui/README_FOURIER_LAB.md).
-
-The current eight-section processing interface is `ui/app_processing.py`.
-After selecting spectral bands, choose whether a gold patch reference is
-available. With gold, inspect the normalization pixels and reflectance preview;
-without gold, crop and correct raw intensity directly before absorbance.
-For source installs on Windows, run `ui/setup_windows.bat` once, then
-`ui/launch_processing_windows.bat`. It opens at `http://127.0.0.1:8766`.
-
-For a standalone Windows application requiring no Python or VS Code on the
-user's computer, see [Windows packaging](packaging/README.md). A Windows builder
-can double-click `build_windows.bat`, or use the **Build Windows app** GitHub
-Actions workflow to produce the tested application ZIP.
-
-The instructions below describe the original `ui/app.py` interface.
-
-The UI runs locally and opens in a web browser. Images and results remain on
-the computer; `127.0.0.1` is not a public internet address.
-
-### Existing Conda environment
-
-If the `qcl` environment is already installed:
+The setup scripts create a repository-local `.venv` and install UI dependencies.
+Alternatively, in an activated Python 3.12 environment, from the repository root:
 
 ```bash
-conda activate qcl
-python ui/app.py
+python -m pip install -e ".[ui]"
+python ui/app_processing.py
 ```
 
-Then open <http://127.0.0.1:8765>.
+Open <http://127.0.0.1:8766>. Keep the server terminal open while using the app.
+Export your project before stopping the server or reloading the workspace.
 
-### First-time setup on macOS
+## Processing workflow
 
-1. Install Python 3.12 if it is not already available.
-2. Double-click `ui/setup_macos.command` once.
-3. Double-click `ui/launch_macos.command` whenever you want to use the UI.
+```text
+Raw intensity → optional gold normalization → on-MS crop
+→ optional Fourier filtering → optional rolling-ball correction
+→ absorbance → spectral baseline correction → CNR
+→ optional timelapse → reproducible project ZIP
+```
 
-### First-time setup on Windows
+Without gold, processing uses raw intensity. Absorbance uses each corrected
+image's own analyte-free reference mean. Section 8 compares the processing
+stages and provides horizontal or vertical line profiles.
 
-1. Install Python 3.12 from Python.org and enable the Python launcher.
-2. Double-click `ui/setup_windows.bat` once.
-3. Double-click `ui/launch_windows.bat` whenever you want to use the UI.
+Import a data folder or spectral CSV files with the file chooser. For multiple
+folders, open the dataset-tab workspace; spectral mappings, gold normalization,
+filter settings, and analyte-free selection methods are shared by default.
+Spatial selections remain independent between folders. Final comparison uses
+independent color scales and offers a line profile for each folder.
 
-The setup scripts create a `.venv` inside the repository and install
-`.[ui]`. This environment is excluded from Git.
+Section 10 exports numerical results, full raw inputs for the selected
+patterns/bands, effective parameters, reference selections, and environment
+information. Choose a ZIP filename before downloading. Use **Import processing
+ZIP → Reproduce processing** to recalculate and verify a saved project without
+the original source directory. Multi-folder exports can be imported into the
+comparison workspace. See the quick start for what is and is not restored.
 
-## UI workflow
+## Other interfaces
 
-1. Select a `stacks` directory and run dataset indexing/QC.
-2. Inspect raw MCT images, brightest gold-reference pixels, and reference
-   stability.
-3. Draw non-overlapping on-MS and out-MS regions.
-4. Draw independent cell-free R0 regions inside the two crops.
-5. Calculate absorbance and review the reference-region checks.
-6. Build an on-MS or out-MS timelapse for a chosen wavenumber and pattern
-   range, with playback speed and QC-frame controls.
-7. Download the results ZIP.
-
-The ZIP contains reflectance and absorbance arrays, QC flags, R0 summaries,
-reference-region checks, ROI coordinates, and processing metadata.
+- [Original Image Workbench](ui/README.md): `python ui/app.py`, port 8765;
+  the legacy workflow with independent on-MS/out-MS regions.
+- [Fourier Image Lab](ui/README_FOURIER_LAB.md):
+  `python ui/app_fourier_lab.py`, port 8767; synthetic-image and filter experiments.
 
 ## Development
 
-Install development and UI dependencies:
+- `src/qcl_analysis/`: reusable numerical processing functions.
+- `ui/`: local interfaces, project import/export, and launchers.
+- `notebooks/`: exploration and validation workflows.
+- `tests/`: processing, API, and browser-state helper tests.
+- `packaging/`: standalone Windows build and runtime checks.
+
+Install development dependencies and run Python tests:
 
 ```bash
 python -m pip install -e ".[dev,ui]"
+python -m pytest
 ```
 
-Run the test suite:
+With Node.js available, also run the browser helper tests directly:
 
 ```bash
-pytest
+node tests/test_line_profile_ui.cjs
+node tests/test_processing_sharing.cjs
+node tests/test_reproduction_ui.cjs
+node tests/test_uploads_ui.cjs
 ```
+
+Node.js is only needed for these tests, not to run the workbench. Save research
+inputs and exported projects outside the checkout or in the ignored `data/`
+and `outputs/` directories. Windows application builds have separate checks;
+see the packaging guide before distributing an EXE.
