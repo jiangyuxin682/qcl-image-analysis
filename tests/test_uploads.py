@@ -117,3 +117,137 @@ def test_adopt_releases_previous_uploaded_inputs():
     state.adopt(ProcessingState())
     from pathlib import Path
     assert not Path(work.name).exists()
+
+
+def stream_request(entries=None):
+    entries = entries or [{'path': 'lineScan_1601_0invcm.csv', 'size': 8, 'last_modified': 123000}]
+    header = json.dumps({'kind': 'files', 'files': entries}).encode()
+    return len(header).to_bytes(8, 'big') + header + b'1,2\n3,4\n'
+
+
+def test_streamed_csv_import_and_incomplete_cleanup():
+    from ui.uploads import streamed_raw_upload
+    data = stream_request()
+    state = streamed_raw_upload(io.BytesIO(data), len(data))
+    assert state.discovery_state()['files'] == 1
+    assert (state.dataset.created_timestamp == 123).all()
+    state._uploaded_inputs.cleanup()
+    with pytest.raises(ValueError, match='Incomplete'):
+        streamed_raw_upload(io.BytesIO(data[:-1]), len(data))
+    data = stream_request([{'path': '../lineScan_1601_0invcm.csv', 'size': 8, 'last_modified': 0}])
+    with pytest.raises(ValueError, match='Invalid'):
+        streamed_raw_upload(io.BytesIO(data), len(data))
+
+
+def test_copy_upload_bounds_memory_and_accepts_large_total():
+    from ui.uploads import copy_upload
+    class Source:
+        def read(self, size):
+            assert size <= 1024**2
+            return b'x' * size
+    class Sink:
+        count = 0
+        def write(self, data):
+            self.count += len(data)
+    sink = Sink()
+    copy_upload(Source(), sink, 1024**3 + 17)
+    assert sink.count == 1024**3 + 17
+
+
+def test_local_folder_import_does_not_upload_or_copy(acquisition, monkeypatch):
+    session = ComparisonSession()
+    monkeypatch.setattr('ui.app_processing.COMPARISON', session)
+    handler = Handler.__new__(Handler)
+    results = []
+    handler.json = lambda result, status=200: results.append((status, result))
+    def post(path, payload):
+        body = json.dumps(payload).encode()
+        handler.path = path
+        handler.headers = {'Content-Length': str(len(body))}
+        handler.rfile = io.BytesIO(body)
+        handler.do_POST()
+        return results[-1]
+    monkeypatch.setattr('ui.app_processing.choose_local_folder', lambda: '')
+    assert post('/api/choose-folder', {}) == (200, {'path': ''})
+    assert post('/api/import-local', {'path': str(acquisition)})[0] == 200
+    state = session.get('default')
+    assert state._uploaded_inputs is None
+    assert all(p.is_relative_to(acquisition) for p in state.dataset.path)
+    previous = state.discovery_state()
+    assert post('/api/import-local', {'path': str(acquisition / 'missing')})[0] != 200
+    assert state.discovery_state() == previous
+    result = post('/api/datasets', {'path': str(acquisition), 'name': 'Direct'})
+    assert result[0] == 200
+    assert session.get(result[1]['id'])._uploaded_inputs is None
+
+
+def test_file_backed_zip_reproduction(acquisition, tmp_path):
+    from ui.reproduction import reproduce
+    original = complete(acquisition)
+    path = tmp_path / 'project.zip'
+    path.write_bytes(original.export())
+    with path.open('rb') as stream:
+        state, report = reproduce(stream)
+    assert report['summary']['mismatch'] == 0
+    state._reproduction_inputs.cleanup()
+    source = ComparisonSession()
+    one = source.register(original, 'A')['id']
+    two = source.register(original, 'B')['id']
+    path.write_bytes(source.export([one, two]))
+    target = ComparisonSession()
+    with path.open('rb') as stream:
+        result = target.import_projects(stream)
+    for dataset in result['datasets']:
+        restored = target.get(dataset['id'])
+        assert restored.reproduction_report['summary']['mismatch'] == 0
+        restored._reproduction_inputs.cleanup()
+
+
+@pytest.mark.parametrize('platform', ['darwin', 'win32', 'linux'])
+def test_system_folder_chooser_cancel_unicode_and_failure(monkeypatch, platform):
+    import subprocess
+    import sys
+    from types import SimpleNamespace
+
+    from ui.uploads import choose_local_folder
+    monkeypatch.setattr(sys, 'platform', platform)
+    calls = []
+    def run(command, **kwargs):
+        calls.append(command)
+        assert kwargs['timeout'] == 300
+        return SimpleNamespace(stdout='C:/研究 data\n'.encode())
+    monkeypatch.setattr(subprocess, 'run', run)
+    assert choose_local_folder() == 'C:/研究 data'
+    assert isinstance(calls[0], list)
+    monkeypatch.setattr(subprocess, 'run', lambda *args, **kwargs: SimpleNamespace(stdout=b''))
+    assert choose_local_folder() == ''
+    def fail(*args, **kwargs):
+        raise OSError('No desktop')
+    monkeypatch.setattr(subprocess, 'run', fail)
+    with pytest.raises(ValueError, match='system folder chooser'):
+        choose_local_folder()
+
+
+def test_streaming_http_routes(acquisition, monkeypatch):
+    session = ComparisonSession()
+    monkeypatch.setattr('ui.app_processing.COMPARISON', session)
+    class BoundedReader(io.BytesIO):
+        def read(self, size=-1):
+            assert 0 <= size <= 1024**2
+            return super().read(size)
+    handler = Handler.__new__(Handler)
+    results = []
+    handler.json = lambda result, status=200: results.append((status, result))
+    def post(path, body):
+        handler.path = path
+        handler.headers = {'Content-Length': str(len(body))}
+        handler.rfile = BoundedReader(body)
+        handler.do_POST()
+        assert results[-1][0] == 200, results[-1]
+        return results[-1][1]
+    imported = post('/api/datasets/upload-csv', stream_request())
+    session.get(imported['id'])._uploaded_inputs.cleanup()
+    original = complete(acquisition)
+    restored = post('/api/reproduce', original.export())
+    assert restored['report']['summary']['mismatch'] == 0
+    session.get('default')._reproduction_inputs.cleanup()

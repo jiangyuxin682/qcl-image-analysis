@@ -50,7 +50,8 @@ Without gold, processing uses raw intensity. Absorbance uses each corrected
 image's own analyte-free reference mean. Section 8 compares the processing
 stages and provides horizontal or vertical line profiles.
 
-Import a data folder or spectral CSV files with the file chooser. For multiple
+Choose a local data folder with the system folder chooser; it is read directly
+without a browser upload size limit. Selected CSV files are streamed to disk. For multiple
 folders, open the dataset-tab workspace; spectral mappings, gold normalization,
 filter settings, and analyte-free selection methods are shared by default.
 Spatial selections remain independent between folders. Final comparison uses

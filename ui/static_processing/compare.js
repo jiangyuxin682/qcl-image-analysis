@@ -23,6 +23,13 @@ $('#folder-input-kind').onchange=()=>{
   const kind=$('#folder-input-kind').value;
   $('#folder-picker-label').hidden=kind!=='folder';$('#folder-files-label').hidden=kind!=='files';$('#folder-zip-label').hidden=kind!=='zip';
 };
+let localComparisonFolder='';
+$('#folder-picker').onclick=async()=>{
+  $('#folder-picker').disabled=true;
+  try{const path=await QCLUpload.chooseFolder();if(path){localComparisonFolder=path;$('#folder-picker-path').textContent=path;}}
+  catch(e){$('#multi-status').textContent=e.message;}
+  finally{$('#folder-picker').disabled=false;}
+};
 $('#add-folder').onclick=async()=>{
   importing=true;tabs();
   try{
@@ -38,8 +45,10 @@ $('#add-folder').onclick=async()=>{
       }
     }else{
       $('#multi-status').textContent='Importing selected spectral files…';
-      const files=$(kind==='folder'?'#folder-picker':'#folder-files').files;
-      const response=await fetch('/api/datasets/upload',{method:'POST',body:QCLUpload.data(files,kind,name)});
+      if(kind==='folder'&&!localComparisonFolder)throw Error('Choose a local data folder first.');
+      const response=kind==='folder'
+        ?await fetch('/api/datasets',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:localComparisonFolder,name})})
+        :await fetch('/api/datasets/upload-csv',{method:'POST',body:QCLUpload.stream($('#folder-files').files,name)});
       const result=await response.json();if(!response.ok)throw Error(result.error||'Data import failed.');addDatasetTab(result);
     }
     $('#folder-name').value='';$('#import-folders').open=false;

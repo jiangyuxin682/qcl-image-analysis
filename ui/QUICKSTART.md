@@ -30,7 +30,8 @@ its displayed address. The original app on port 8765 is a different interface.
 
 ## 2. Import your first dataset
 
-In Section 1, choose **Data folder** and select your `stacks` folder, one pattern
+In Section 1, choose **Data folder**, click **Choose folder…** to open the system
+folder selector, and select your `stacks` folder, one pattern
 folder, or an acquisition folder containing `stacks`. A typical layout is:
 
 ```text
@@ -47,10 +48,14 @@ acquisition/
 ```
 
 Wavenumbers are read from `lineScan_<integer>_0invcm.csv` filenames. Only matching
-spectral CSV files are sent to the local server. Your original files are unchanged.
+spectral CSV files are indexed. The server reads the selected local folder
+directly: there is no browser upload or 1 GiB folder limit. Keep the folder in
+place and accessible until processing/export is complete. Original files are unchanged.
 Alternatively, choose **Spectral CSV files** and select all needed bands from
 **one pattern**. Files you do not select cannot be discovered automatically;
-use folder import to include multiple patterns or all bands.
+use folder import to include multiple patterns or all bands. Selected CSVs are
+streamed to temporary disk storage in bounded chunks, without a 1 GiB total
+selection limit; allow sufficient free disk space.
 
 For a saved processing project, use the ZIP workflow below instead. An
 application distribution ZIP or an arbitrary ZIP of CSV files is not a
@@ -174,7 +179,8 @@ for the verification details.
 | Later sections are locked | Finish or recalculate the preceding section after parameter edits. A Section 5 live preview does not commit processing. |
 | CNR cannot be calculated | Select both background and target; they must not overlap. The background needs enough valid pixels and nonzero variation for a defined CNR. |
 | Final comparison is blocked | Calculate current CNR in every tab; resolve enabled sharing-group conflicts and select a common stage/band. |
-| Import exceeds limits | Uploads are limited to 1 GiB; processing ZIPs also have a 4 GiB expanded limit. Use a smaller selected dataset/project. |
+| Import exceeds limits | Local folders and streamed CSV selection have no 1 GiB upload cap. Processing ZIPs retain a 1 GiB compressed / 4 GiB expanded limit; use a smaller project for ZIP import. |
+| Folder chooser does not appear | Check behind the browser for the system dialog. It opens on the computer running the server and requires a local desktop. CSV selection remains available. |
 | Source installation cannot export MP4 | The source app needs an available FFmpeg executable. The standalone Windows distribution includes it. Timelapse can be skipped. |
 | A session disappears after restart/reload | Sessions are held in server memory and workspace tabs are not persisted. Import an exported project ZIP to reproduce the work. |
 

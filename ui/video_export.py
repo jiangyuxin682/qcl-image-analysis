@@ -1,6 +1,6 @@
 """Encode the displayed timelapse PNGs into an annotated constant-FPS MP4.
 
-Pillow lays out the title, original heatmap, inferno color scale, and each
+Pillow lays out the title, original heatmap, selected color scale, and each
 frame's timestamp line. FFmpeg encodes one frame per image at the requested
 rate; temporary files are removed automatically. Numerical arrays are untouched.
 """
@@ -13,7 +13,8 @@ import sys
 import tempfile
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
-from matplotlib import colormaps, font_manager
+from matplotlib import font_manager
+from ui.colormaps import display_colormap
 
 
 def find_ffmpeg():
@@ -67,7 +68,7 @@ def encode_video(video, fps, labels):
     iw, ih = max(1,round(first.width*scale)), max(1,round(first.height*scale))
     height = ih+150+extra_height
     height += height%2
-    gradient = colormaps['inferno'](np.linspace(1,0,ih), bytes=True)[:,:3]
+    gradient = display_colormap(video.get('cmap', 'inferno'))(np.linspace(1,0,ih), bytes=True)[:,:3]
     bar = Image.fromarray(np.repeat(gradient[:,None,:],18,axis=1))
     with tempfile.TemporaryDirectory(prefix='qcl-video-') as folder:
         for i, (frame, label) in enumerate(zip(video['frames'], labels)):

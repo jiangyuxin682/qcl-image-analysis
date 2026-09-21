@@ -71,8 +71,9 @@ from ui.reproduction import (
     resolved_parameters,
     write_project,
 )
-from ui.uploads import raw_upload, zip_filename
+from ui.uploads import raw_upload, zip_filename, streamed_raw_upload, copy_upload, choose_local_folder
 from ui.video_export import encode_video
+from ui.colormaps import display_colormap
 
 
 def display_limits(limits, payload):
@@ -86,7 +87,8 @@ def render_processing_png(array, payload, *, limits=None, low=0, high=100):
     if limits is None:
         finite = array[np.isfinite(array)]
         limits = tuple(np.percentile(finite, [low, high])) if finite.size else (0.0, 1.0)
-    return render_data_png(array, limits=display_limits(limits, payload))
+    return render_data_png(array, limits=display_limits(limits, payload),
+                           cmap=display_colormap(payload.get("cmap", "inferno")))
 
 STATIC = Path(__file__).with_name("static_processing")
 FILE_RE = re.compile(r"^lineScan_(\d+)_0invcm\.csv$", re.IGNORECASE)
@@ -572,6 +574,33 @@ class ProcessingState:
         self.stage = "referenced"
         self.version += 1
         return {**self.status(), "qc": selected.drop(columns="path").to_dict(orient="records")}
+
+    def signal_trends(self, payload):
+        """Read actual reference levels and finite-pixel medians, without display clipping."""
+        self.require("referenced")
+        wn = integer(payload["wavenumber"], "Wavenumber")
+        if wn not in self.bands:
+            raise ValueError("Choose an involved wavenumber for signal trends.")
+        r0 = {(r["pattern"], r["wavenumber"]): r["r0"] for r in self.r0_records}
+
+        def median(array):
+            if array is None:
+                return None
+            values = array[np.isfinite(array)]
+            return float(np.median(values)) if values.size else None
+
+        rows = []
+        for row in self.qc[self.qc.wavenumber == wn].sort_values("frame").itertuples(index=False):
+            key = (row.pattern, wn)
+            rows.append({
+                "pattern": row.pattern, "frame": int(row.frame),
+                "i_goldref": float(row.i_goldref) if self.has_gold else None,
+                "r0": r0.get(key),
+                "median_full": median((self.ref if self.has_gold else self.raw).get(key)),
+                "median_crop": median(self.crops.get(key)),
+                "median_corrected": median(self.flat[key].corrected) if key in self.flat else None,
+            })
+        return {"wavenumber": wn, "has_gold": self.has_gold, "records": rows}
 
     def processing_images(self):
         self.require("referenced")
@@ -1264,17 +1293,29 @@ class ProcessingState:
         if payload.get("skip_invalid"):
             rows = rows[rows.frame_valid]
         rows = rows.sort_values("frame")
+        # Use all discovered bands/patterns, before playback range or QC filtering.
+        # The earliest file timestamp represents the start of each acquisition.
+        starts = {}
+        for frame, group in self.dataset.groupby("frame"):
+            finite = group[np.isfinite(group.created_timestamp)]
+            if not finite.empty:
+                first = finite.loc[finite.created_timestamp.idxmin()]
+                starts[int(frame)] = (float(first.created_timestamp), first.timestamp_source)
         frames = []
         arrays = []
         for row in rows.itertuples(index=False):
             a = self.stage_arrays((row.pattern, wn))[kind]
             if a is not None:
                 arrays.append(a)
+                timestamp, source = starts.get(int(row.frame), (None, None))
+                previous = starts.get(int(row.frame) - 1)
+                dt = timestamp - previous[0] if timestamp is not None and previous else None
                 frames.append(
                     {
                         "pattern": row.pattern,
-                        "timestamp": row.created_timestamp,
-                        "timestamp_source": row.timestamp_source,
+                        "timestamp": timestamp,
+                        "timestamp_source": source,
+                        "dt_seconds": dt,
                         "valid": bool(row.frame_valid),
                     }
                 )
@@ -1285,9 +1326,14 @@ class ProcessingState:
             raise ValueError("Contrast percentiles must satisfy 0 <= low < high <= 100.")
         limits = display_limits(self.limits(arrays, low, high), payload)
         for f, a in zip(frames, arrays):
-            png, _, _ = render_data_png(a, limits=limits)
+            png, _, _ = render_data_png(a, limits=limits,
+                                        cmap=display_colormap(payload.get("cmap", "inferno")))
             f["png"] = base64.b64encode(png).decode()
-            f["elapsed_seconds"] = f["timestamp"] - frames[0]["timestamp"]
+            f["elapsed_seconds"] = (
+                f["timestamp"] - frames[0]["timestamp"]
+                if f["timestamp"] is not None and frames[0]["timestamp"] is not None
+                else None
+            )
         extrema = []
         for frame, array in zip(frames, arrays):
             finite = array[np.isfinite(array)]
@@ -1302,6 +1348,7 @@ class ProcessingState:
         else:
             extrema_label = "Data extrema: no finite values"
         self.last_video = {
+            "cmap": payload.get("cmap", "inferno"),
             "colorbar_zero": payload.get("colorbar_zero") in (True, "true", "1"),
             "processing_basis": "reflectance" if self.has_gold else "raw_intensity",
             "extrema_label": extrema_label,
@@ -1314,11 +1361,6 @@ class ProcessingState:
             "high": high,
             "vmin": limits[0],
             "vmax": limits[1],
-            "median_interval_seconds": float(
-                np.median(np.diff([f["timestamp"] for f in frames]))
-            )
-            if len(frames) > 1
-            else 0,
         }
         return self.last_video
 
@@ -1577,6 +1619,8 @@ class Handler(BaseHTTPRequestHandler):
                         return self.json({"kind": "reproduced", "state": session.restored_state()})
                     session.require("discovered")
                     return self.json({"kind": "raw", "state": session.discovery_state()})
+                if url.path == "/api/signal-trends":
+                    return self.json(session.signal_trends(query))
                 if url.path == "/api/image":
                     return self.json(
                         session.image({k: v[0] for k, v in parse_qs(url.query).items()})
@@ -1605,15 +1649,33 @@ class Handler(BaseHTTPRequestHandler):
         try:
             length = int(self.headers.get("Content-Length", 0))
             url = urlparse(self.path)
-            if url.path in {"/api/reproduce", "/api/upload-data", "/api/datasets/upload", "/api/datasets/reproduce"}:
+            if url.path in {"/api/upload-csv", "/api/datasets/upload-csv"}:
+                imported = streamed_raw_upload(self.rfile, length)
+                if url.path == "/api/datasets/upload-csv":
+                    return self.json(COMPARISON.register(imported, imported.import_name))
+                session = COMPARISON.get(parse_qs(url.query).get("dataset", ["default"])[0])
+                with session.lock:
+                    session.adopt(imported)
+                    return self.json(session.discovery_state())
+            if url.path in {"/api/reproduce", "/api/datasets/reproduce"}:
+                import tempfile
+                if not 0 < length <= MAX_UPLOAD:
+                    raise ValueError("Selected ZIP must be no larger than 1 GiB.")
+                with tempfile.TemporaryFile() as upload:
+                    copy_upload(self.rfile, upload, length)
+                    upload.seek(0)
+                    if url.path == "/api/datasets/reproduce":
+                        name = parse_qs(url.query).get("name", [""])[0]
+                        return self.json(COMPARISON.import_projects(upload, name))
+                    session = COMPARISON.get(parse_qs(url.query).get("dataset", ["default"])[0])
+                    with session.lock:
+                        return self.json(session.restore_project(upload))
+            if url.path in {"/api/upload-data", "/api/datasets/upload"}:
                 if not 0 < length <= MAX_UPLOAD:
                     raise ValueError("Selected upload must be no larger than 1 GiB.")
                 data = self.rfile.read(length)
                 if len(data) != length:
                     raise ValueError("Incomplete file upload.")
-                if url.path == "/api/datasets/reproduce":
-                    name = parse_qs(url.query).get("name", [""])[0]
-                    return self.json(COMPARISON.import_projects(data, name))
                 if url.path in {"/api/upload-data", "/api/datasets/upload"}:
                     imported, _discovered = raw_upload(data, self.headers.get("Content-Type", ""))
                     if url.path == "/api/datasets/upload":
@@ -1622,13 +1684,19 @@ class Handler(BaseHTTPRequestHandler):
                     with session.lock:
                         session.adopt(imported)
                         return self.json(session.discovery_state())
-                session = COMPARISON.get(parse_qs(url.query).get("dataset", ["default"])[0])
-                with session.lock:
-                    return self.json(session.restore_project(data))
             if not 0 < length <= 1_000_000:
                 raise ValueError("Invalid request size.")
             payload = json.loads(self.rfile.read(length))
             url = urlparse(self.path)
+            if url.path == "/api/choose-folder":
+                return self.json({"path": choose_local_folder()})
+            if url.path == "/api/import-local":
+                imported = ProcessingState()
+                imported.discover(payload)
+                session = COMPARISON.get(parse_qs(url.query).get("dataset", ["default"])[0])
+                with session.lock:
+                    session.adopt(imported)
+                    return self.json(session.discovery_state())
             if url.path == "/api/datasets":
                 return self.json(COMPARISON.add(payload))
             session = COMPARISON.get(parse_qs(url.query).get("dataset", ["default"])[0])

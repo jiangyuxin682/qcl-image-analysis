@@ -109,11 +109,23 @@ def write_project(archive, state, metadata, clean_json):
                                                 'files': inventory}, indent=2))
 
 
+def archive_source(data):
+    if isinstance(data, (bytes, bytearray)):
+        size = len(data)
+        source = io.BytesIO(data)
+    else:
+        data.seek(0, 2)
+        size = data.tell()
+        data.seek(0)
+        source = data
+    if not 0 < size <= MAX_UPLOAD:
+        raise ValueError('Project ZIP exceeds the 1 GiB limit.')
+    return source
+
+
 def validated_archive(data):
-    if not data or len(data) > MAX_UPLOAD:
-        raise ValueError('Reproduction ZIP must be no larger than 1 GiB.')
     try:
-        archive = zipfile.ZipFile(io.BytesIO(data))
+        archive = zipfile.ZipFile(archive_source(data))
         names = archive.namelist()
         if len(names) != len(set(names)) or len(names) > 100000:
             raise ValueError('Archive contains duplicate names or too many files.')
@@ -134,7 +146,11 @@ def validated_archive(data):
         if set(inventory) != set(names) - {'manifest.json'}:
             raise ValueError('Manifest does not match the archive file list.')
         for name, entry in inventory.items():
-            if archive.getinfo(name).file_size != entry['size'] or hashlib.sha256(archive.read(name)).hexdigest() != entry['sha256']:
+            digest = hashlib.sha256()
+            with archive.open(name) as member:
+                while chunk := member.read(1024 * 1024):
+                    digest.update(chunk)
+            if archive.getinfo(name).file_size != entry['size'] or digest.hexdigest() != entry['sha256']:
                 raise ValueError(f'File checksum mismatch: {name}')
         return archive
     except (zipfile.BadZipFile, json.JSONDecodeError, KeyError, TypeError, NotImplementedError) as exc:
@@ -333,9 +349,7 @@ def reproduce(data, progress=lambda **values: None):
 
 def project_members(data, name=''):
     """Accept a single project or the app's multi-dataset export; never extract ZIPs."""
-    if not data or len(data) > MAX_UPLOAD:
-        raise ValueError('Project ZIP exceeds the 1 GiB limit.')
-    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+    with zipfile.ZipFile(archive_source(data)) as archive:
         names = archive.namelist()
         if 'manifest.json' in names:
             yield name or 'Imported project', data
@@ -354,10 +368,14 @@ def project_members(data, name=''):
             raise ValueError('Multi-dataset archive does not match its dataset summary.')
         expanded = 0
         for i, item in enumerate(datasets, 1):
-            package = archive.read(f'dataset_{i}/results.zip')
-            with zipfile.ZipFile(io.BytesIO(package)) as inner:
-                expanded += sum(info.file_size for info in inner.infolist())
-                if expanded > MAX_EXPANDED:
-                    raise ValueError('Combined projects expand beyond the 4 GiB limit.')
-            label = str(item.get('name') or f'Dataset {i}')
-            yield f'{name} · {label}' if name else label, package
+            with tempfile.TemporaryFile() as package:
+                with archive.open(f'dataset_{i}/results.zip') as member:
+                    import shutil
+                    shutil.copyfileobj(member, package, 1024 * 1024)
+                package.seek(0)
+                with zipfile.ZipFile(package) as inner:
+                    expanded += sum(info.file_size for info in inner.infolist())
+                    if expanded > MAX_EXPANDED:
+                        raise ValueError('Combined projects expand beyond the 4 GiB limit.')
+                label = str(item.get('name') or f'Dataset {i}')
+                yield f'{name} · {label}' if name else label, package

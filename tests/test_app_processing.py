@@ -934,3 +934,108 @@ def test_line_profile_rejects_invalid_endpoints(acquisition, end):
     with pytest.raises(ValueError, match='endpoints'):
         state.line_profile({'pattern': 'pattern0', 'wavenumber': 1658,
                             'start': {'x': 0, 'y': 0}, 'end': end})
+
+
+@pytest.mark.parametrize('cmap,low,high', [
+    ('gray_r', (255, 255, 255), (0, 0, 0)),
+    ('gray', (0, 0, 0), (255, 255, 255)),
+    ('magenta', (0, 0, 0), (255, 0, 255)),
+    ('yellow', (0, 0, 0), (255, 255, 0)),
+    ('blue', (0, 0, 0), (0, 0, 255)),
+])
+def test_display_colormap_endpoints(cmap, low, high):
+    from PIL import Image
+    from ui.app_processing import render_processing_png
+    array = np.array([[0., 1.]])
+    png, vmin, vmax = render_processing_png(array, {'cmap': cmap})
+    pixels = np.asarray(Image.open(io.BytesIO(png)))
+    np.testing.assert_array_equal(pixels[0, 0, :3], low)
+    np.testing.assert_array_equal(pixels[0, -1, :3], high)
+    assert (vmin, vmax) == (0, 1)
+    np.testing.assert_array_equal(array, [[0., 1.]])
+
+
+def test_timelapse_colormap_preserves_values(acquisition):
+    state = complete(acquisition)
+    before = state.baselines[('pattern0', 1658)].corrected.copy()
+    default = state.timelapse({'wavenumber': 1658})
+    blue = state.timelapse({'wavenumber': 1658, 'cmap': 'blue'})
+    assert blue['cmap'] == 'blue'
+    assert (blue['vmin'], blue['vmax']) == (default['vmin'], default['vmax'])
+    assert blue['frames'][0]['png'] != default['frames'][0]['png']
+    np.testing.assert_array_equal(state.baselines[('pattern0', 1658)].corrected, before)
+    with pytest.raises(ValueError, match='color map'):
+        state.timelapse({'wavenumber': 1658, 'cmap': 'invalid'})
+
+
+def test_timelapse_dt_uses_pattern_starts_before_filters(acquisition):
+    state = complete(acquisition)
+    # Earliest band is not a processing band, and the displayed bands have
+    # different acquisition offsets. QC retains its old per-band timestamps.
+    for pattern, start in [('pattern0', 1000.), ('pattern1', 1060.)]:
+        for band, offset in [(1080, 0), (1601, 3), (1658, 9), (1702, 20)]:
+            mask = (state.dataset.pattern == pattern) & (state.dataset.wavenumber == band)
+            state.dataset.loc[mask, 'created_timestamp'] = start + offset
+    video = state.timelapse({'wavenumber': 1658})
+    assert 'median_interval_seconds' not in video
+    assert [f['timestamp'] for f in video['frames']] == [1000., 1060.]
+    assert [f['dt_seconds'] for f in video['frames']] == [None, 60.]
+    assert [f['elapsed_seconds'] for f in video['frames']] == [0., 60.]
+    other = state.timelapse({'wavenumber': 1601, 'kind': 'raw'})
+    assert [f['timestamp'] for f in other['frames']] == [1000., 1060.]
+    state.qc.loc[state.qc.pattern == 'pattern0', 'frame_valid'] = False
+    filtered = state.timelapse({'wavenumber': 1658, 'start': 1, 'skip_invalid': True})
+    assert len(filtered['frames']) == 1
+    assert filtered['frames'][0]['dt_seconds'] == 60.
+    assert filtered['frames'][0]['elapsed_seconds'] == 0.
+    # Do not substitute the previous displayed pattern when p-1 is missing.
+    state.dataset.loc[state.dataset.pattern == 'pattern1', 'frame'] = 3
+    state.qc.loc[state.qc.pattern == 'pattern1', 'frame'] = 3
+    assert state.timelapse({'wavenumber': 1658})['frames'][1]['dt_seconds'] is None
+    # An unprocessed predecessor still supplies timing; a pause stays visible.
+    predecessor = state.dataset.iloc[0].copy()
+    predecessor['pattern'], predecessor['frame'] = 'pattern2', 2
+    predecessor['created_timestamp'] = 1020.
+    state.dataset.loc[len(state.dataset)] = predecessor
+    assert state.timelapse({'wavenumber': 1658})['frames'][1]['dt_seconds'] == 40.
+
+
+def test_signal_trends_use_committed_values_and_explicit_image_regions(acquisition):
+    state = complete(acquisition)
+    wn = 1658
+    key = ('pattern0', wn)
+    # Make full/cropped/corrected image medians distinguishable, including
+    # non-finite pixels. Diagnostics must not clip or drop negative values.
+    state.ref[key] = np.array([[np.nan, -4., 2., 100., np.inf]])
+    state.crops[key] = np.array([[np.nan, -2., 4., 200.]])
+    state.flat[key].corrected[:] = 7.
+    state.flat[key].corrected[0, 0] = np.nan
+    state.qc.loc[state.qc.pattern == 'pattern0', 'frame_valid'] = False
+    result = state.signal_trends({'wavenumber': wn})
+    assert result['has_gold'] is True
+    assert [r['pattern'] for r in result['records']] == ['pattern0', 'pattern1']
+    row = result['records'][0]
+    assert row['median_full'] == 2.
+    assert row['median_crop'] == 4.
+    assert row['median_corrected'] == 7.
+    assert row['r0'] == next(r['r0'] for r in state.r0_records if (r['pattern'], r['wavenumber']) == key)
+    assert row['i_goldref'] == float(state.qc.loc[(state.qc.pattern == 'pattern0') & (state.qc.wavenumber == wn), 'i_goldref'].iloc[0])
+    # A different selected band reads its own arrays and references.
+    other = state.signal_trends({'wavenumber': 1601})['records'][0]
+    assert other['median_full'] == np.median(state.ref[('pattern0', 1601)])
+    state.ref[key][:] = np.nan
+    assert state.signal_trends({'wavenumber': wn})['records'][0]['median_full'] is None
+    with pytest.raises(ValueError, match='involved wavenumber'):
+        state.signal_trends({'wavenumber': 9999})
+
+
+def test_signal_trends_before_absorbance_and_without_gold(acquisition):
+    state = configured(acquisition)
+    rows = state.signal_trends({'wavenumber': 1658})['records']
+    assert all(r['i_goldref'] is not None and r['r0'] is None for r in rows)
+    assert all(r['median_crop'] is None and r['median_corrected'] is None for r in rows)
+    state.normalize({'has_gold': False})
+    result = state.signal_trends({'wavenumber': 1658})
+    assert result['has_gold'] is False
+    assert all(r['i_goldref'] is None for r in result['records'])
+    assert result['records'][0]['median_full'] == np.median(state.raw[('pattern0', 1658)])

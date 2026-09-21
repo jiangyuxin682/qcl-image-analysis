@@ -62,9 +62,9 @@ dependencies included, follow [Windows packaging](../packaging/README.md).
 The new processing path follows notebook 06's on-MS workflow. The original app
 still provides its independent on-MS/out-MS workflow. This interface also
 supports a common-scale timelapse across already processed selected patterns,
-with an inclusive pattern range and optional QC-frame exclusion. Browser file
+with an inclusive pattern range and optional QC-frame exclusion. Browser CSV
 imports use file modification timestamps (`browser_last_modified`); original
-creation times are unavailable. Programmatic path imports use creation times
+creation times are unavailable. Local folder imports use creation times
 when available, with modification-time fallback recorded.
 
 ## Scientific parameters and boundaries
@@ -419,15 +419,27 @@ and 4 GiB expanded. Archive members are never extracted to arbitrary paths.
 
 ## File chooser imports
 
-Section 1 and the multi-folder workspace use browser file choosers instead of
-manual paths. Choose **Data folder** for a pattern, stacks or acquisition
-folder, or **Spectral CSV files** to select all required bands from one pattern.
-Only spectral `lineScan_<wavenumber>_0invcm.csv` files are sent to the local
-server. CSV selection cannot access unselected sibling files; choose the folder
-for automatic discovery of all bands. Uploaded relative paths are validated
-and copied to a session-owned temporary directory. Timestamps use each File's
-`lastModified`, recorded as `browser_last_modified`; original creation times
-are unavailable through browser file selection. Original files are untouched.
+Section 1 and the multi-folder workspace offer **Choose folder…**, which opens
+an operating-system directory chooser on the computer running the server.
+A pattern, stacks or acquisition folder is read directly from its original
+location, with no upload or 1 GiB folder limit. Keep the source available for
+the duration of the session. Local folder imports preserve the existing
+creation-time/modification-time fallback behavior. Cancelling the chooser leaves
+the previous selection unchanged; failed discovery leaves the current session intact.
+
+Alternatively, **Spectral CSV files** selects all required bands from one pattern.
+The browser streams a metadata header and file bytes; the server writes them to
+a session-owned temporary directory in chunks of at most 1 MiB. No aggregate
+1 GiB CSV limit applies. Relative names and declared sizes are validated, and
+incomplete uploads are rejected. CSV selection cannot access unselected siblings.
+Timestamps use each file's `lastModified`, recorded as `browser_last_modified`.
+Original files are untouched. Large datasets still require disk space and memory
+for numerical processing; direct folder access avoids an extra input copy.
+
+ZIP requests are also streamed to temporary disk, with incremental checksums
+and disk-backed nested project archives. The existing 1 GiB compressed / 4 GiB
+expanded ZIP validation limits remain in force. Numerical reproduction still
+loads the selected image arrays for processing.
 
 In multi-folder mode, select **Processing project ZIP** to reproduce a project
 or an entire multi-dataset ZIP into tabs. Each bundle is fully reproduced
@@ -436,3 +448,49 @@ sequentially; earlier successful ZIPs remain if a later ZIP fails. Imported
 recipes are preserved rather than silently overwritten by workspace settings.
 If enabled sharing groups differ, turn off those groups' switches or explicitly
 reconfigure and recalculate before Final comparison.
+
+## CNR and timelapse color maps
+
+Sections 8 and 9 have independent **Color map** selectors: Inferno (default),
+White → black (RI), Black → white, Black → magenta, Black → yellow, and
+Black → blue. The monochrome maps are linear ramps; white-to-black matches the
+inverted RI scale. Section 8 applies its selection to all stage images and
+refreshes immediately without invalidating CNR or changing ROIs and profiles.
+Changing the timelapse map rebuilds an existing video preview. Preview color bars
+and exported MP4 color bars use the selected map. Color mapping does not change
+arrays, percentile limits, or CNR. These display preferences are local to each
+dataset tab and are not restored from project ZIPs.
+
+Timelapse timestamps use the earliest available file timestamp across all
+ discovered bands of each pattern, independent of the displayed wavenumber.
+Each frame's **dt** is its pattern start minus the start of the immediately
+preceding numbered pattern (pattern p−1), including patterns outside the video
+range or excluded by QC. Missing predecessor timestamps produce a dash; the
+first pattern also has no dt. **elapsed** is relative to the first displayed
+pattern start, preserving acquisition pauses. Both are displayed to the nearest
+second; playback FPS remains independent. File timestamp sources retain the
+creation-time / modification-time fallback rules described above. Only metadata
+available in the current dataset can be used (reproduced ZIPs may contain a
+subset of the original bands and patterns).
+
+## Temporal signal diagnostics
+
+Section 3 shows **I_goldref vs. pattern** after gold normalization, for the
+currently selected **Preview wavenumber**. It uses the full-image gold-pixel
+means actually used to calculate reflectance. Editing normalization settings
+hides the old graph until normalization is recalculated.
+
+Section 6 shows **R₀ vs. pattern** and **Median R vs. pattern**, also following
+Preview wavenumber. R₀ is the committed corrected-signal mean over the exact
+cell-free selection. It appears after Calculate absorbance and is cleared when
+that selection or upstream processing changes. Median R defaults to the on-MS
+crop before Fourier/rolling-ball correction; a selector switches to the full
+reflectance image or the corrected on-MS image. The median includes all finite
+pixels in the selected image region, including negative values, without display
+clipping or color-map transformations. Without gold, the corresponding graphs
+are labeled I_bg and Median I and use raw-intensity signal units.
+
+Each curve includes all selected patterns, including QC-flagged ones, in numeric
+pattern order. The horizontal axis uses actual pattern indices, preserving gaps
+in selection. Expand the values table below each panel to inspect the numbers.
+Changing the preview pattern does not change these across-pattern curves.
