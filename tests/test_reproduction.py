@@ -102,7 +102,7 @@ def test_changed_reference_results_report_mismatch(acquisition):
     state = complete(acquisition)
     package = state.export()
     with zipfile.ZipFile(io.BytesIO(package)) as archive:
-        name = 'pattern0/1658cm-1/absorbance.csv'
+        name = 'pattern0/1658cm-1/Abs_uncorrected.csv'
         array = np.loadtxt(io.BytesIO(archive.read(name)), delimiter=',')
     array[0, 0] += .01
     output = io.StringIO()
@@ -171,3 +171,50 @@ def test_raw_array_header_validated_before_allocation():
     np.lib.format.write_array_header_1_0(data, {'descr': '<f8', 'fortran_order': False, 'shape': (1000000000, 1000000000)})
     with pytest.raises(ValueError, match='byte length'):
         read_raw_array(data.getvalue(), [1000000000, 1000000000])
+
+
+def test_previous_result_names_remain_reproducible(acquisition):
+    from ui.reproduction import RESULT_FILENAMES
+    original = complete(acquisition)
+    with zipfile.ZipFile(io.BytesIO(original.export())) as archive:
+        files = {}
+        for name in archive.namelist():
+            old_name = name
+            for stage, filename in RESULT_FILENAMES.items():
+                if name.endswith('/' + filename + '.csv'):
+                    old_name = name.rsplit('/', 1)[0] + '/' + stage + '.csv'
+                    break
+            files[old_name] = archive.read(name)
+    manifest = json.loads(files['manifest.json'])
+    manifest['files'] = {name: {'size': len(data), 'sha256': hashlib.sha256(data).hexdigest()}
+                         for name, data in files.items() if name != 'manifest.json'}
+    files['manifest.json'] = json.dumps(manifest).encode()
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, 'w') as archive:
+        for name, data in files.items():
+            archive.writestr(name, data)
+    replay, report = reproduce(output.getvalue())
+    assert report['status'] in {'exact', 'within_tolerance'}
+
+
+def test_old_grouped_cnr_is_verified_then_migrated_to_individual_scales(acquisition):
+    original = complete(acquisition)
+    payload = {'background': {'x_min': 0, 'x_max': 3, 'y_min': 0, 'y_max': 3},
+               'target': {'x_min': 6, 'x_max': 9, 'y_min': 6, 'y_max': 9}, 'low': 10, 'high': 90}
+    original.cnr(payload, scale_policy='legacy_grouped')
+    package = original.export()
+    with zipfile.ZipFile(io.BytesIO(package)) as archive:
+        recipe = json.loads(archive.read('recipe.json'))
+    del recipe['configuration']['cnr_contrast']['scale_policy']
+    package = rewrite(package, {'recipe.json': json.dumps(recipe).encode()}, rehash=True)
+    replay, report = reproduce(package)
+    assert report['summary']['mismatch'] == 0
+    assert 'cnr_scale_migration' in report
+    assert replay.cnr_scale_policy == 'per_image'
+    expected = original.cnr(payload)['records']
+    assert replay.cnr_records == expected
+    again, next_report = reproduce(replay.export())
+    assert next_report['summary']['mismatch'] == 0
+    assert 'cnr_scale_migration' not in next_report
+    replay._reproduction_inputs.cleanup()
+    again._reproduction_inputs.cleanup()

@@ -64,9 +64,9 @@ def encode_video(video, fps, labels):
     width = max(1100, int(font.getlength(title))+48, max(int(font.getlength(x))+48 for x in labels))
     width += width % 2
     first = Image.open(io.BytesIO(base64.b64decode(video['frames'][0]['png'])))
-    scale = min((width-190)/first.width, 700/first.height)
+    scale = min((width-250)/first.width, 700/first.height)
     iw, ih = max(1,round(first.width*scale)), max(1,round(first.height*scale))
-    height = ih+150+extra_height
+    height = ih+205+extra_height
     height += height%2
     gradient = display_colormap(video.get('cmap', 'inferno'))(np.linspace(1,0,ih), bytes=True)[:,:3]
     bar = Image.fromarray(np.repeat(gradient[:,None,:],18,axis=1))
@@ -78,11 +78,24 @@ def encode_video(video, fps, labels):
             for line_index, line in enumerate(lines):
                 draw.text((24,46+28*line_index),line,font=font,fill='#213a35')
             image = Image.open(io.BytesIO(base64.b64decode(frame['png']))).convert('RGB')
-            canvas.paste(image.resize((iw,ih),Image.Resampling.NEAREST),(24,65+extra_height))
-            canvas.paste(bar,(iw+45,65+extra_height))
-            for fraction, value in [(0,video['vmax']),(.5,(video['vmin']+video['vmax'])/2),(1,video['vmin'])]:
-                draw.text((iw+70,65+extra_height+int(fraction*(ih-24))),f'{value:.4f}',font=font,fill='#213a35')
-            draw.text((24,ih+90+extra_height),label,font=font,fill='#213a35')
+            canvas.paste(image.resize((iw,ih),Image.Resampling.NEAREST),(80,65+extra_height))
+            canvas.paste(bar,(iw+101,65+extra_height))
+            for fraction, value in [(0,frame['vmax']),(.5,(frame['vmin']+frame['vmax'])/2),(1,frame['vmin'])]:
+                draw.text((iw+126,65+extra_height+int(fraction*(ih-24))),f'{value:.4f}',font=font,fill='#213a35')
+            draw.text((24,ih+145+extra_height),label,font=font,fill='#213a35')
+            x, y = 80, 65 + extra_height
+            draw.line((x, y, x, y+ih, x+iw, y+ih), fill='#687a72', width=1)
+            columns, rows = frame['width'], frame['height']
+            for value in sorted(set(round(i*(columns-1)/4) for i in range(5))):
+                px = x+(value+.5)/columns*iw
+                draw.line((px, y+ih, px, y+ih+5), fill='#687a72')
+                draw.text((px, y+ih+8), str(value), font=font, fill='#435b50', anchor='mt')
+            for value in sorted(set(round(i*(rows-1)/4) for i in range(5))):
+                py = y+(value+.5)/rows*ih
+                draw.line((x-5, py, x, py), fill='#687a72')
+                draw.text((x-9, py), str(value), font=font, fill='#435b50', anchor='rm')
+            draw.text((x+iw/2, y+ih+38), 'X (pixel)', font=font, fill='#435b50', anchor='mt')
+            draw.text((8, y-25), 'Y (pixel)', font=font, fill='#435b50')
             canvas.save(Path(folder)/f'{i:06d}.png')
         output = Path(folder)/'timelapse.mp4'
         result = subprocess.run([executable,'-y','-loglevel','error','-framerate',str(fps),'-i',str(Path(folder)/'%06d.png'),'-c:v','libx264','-pix_fmt','yuv420p','-movflags','+faststart',str(output)],capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0)

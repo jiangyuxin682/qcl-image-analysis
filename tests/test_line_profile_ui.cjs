@@ -43,7 +43,7 @@ test('vertical selection locks x; same-axis endpoint is rejected',()=>{
 function comparisonSetup(){
   function el(tag,text){return {tag,text,children:[],style:{},value:'',append(...nodes){this.children.push(...nodes)},setAttribute(){},querySelector(){return null},getBoundingClientRect(){return {left:0,top:0,width:100,height:50}}};}
   const calls=[],plots=[];let resolve;
-  const context={el,revision:1,datasets:[],URLSearchParams,api:(url,payload)=>{calls.push({url,payload});return new Promise(r=>resolve=r)}};
+  const context={QCLImages:{eventPoint:e=>e},el,revision:1,datasets:[],URLSearchParams,api:(url,payload)=>{calls.push({url,payload});return new Promise(r=>resolve=r)}};
   vm.createContext(context);vm.runInContext(fs.readFileSync(require('node:path').join(__dirname,'../ui/static_processing/line_profile.js'),'utf8'),context);
   context.QCLLine.drawLine=()=>{};context.QCLLine.renderPlot=(...args)=>plots.push(args);
   const compare=fs.readFileSync(require('node:path').join(__dirname,'../ui/static_processing/compare.js'),'utf8');

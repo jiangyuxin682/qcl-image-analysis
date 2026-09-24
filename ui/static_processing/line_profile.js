@@ -4,6 +4,15 @@
 function snapEnd(start,end,direction){
   return direction==='vertical'?{x:start.x,y:end.y}:{x:end.x,y:start.y};
 }
+function orientLabels(root,orientation={}){
+  const sx=orientation.horizontal?-1:1,sy=orientation.vertical?-1:1;
+  for(const text of root.querySelectorAll('.profile-line-overlay text')){
+    const x=Number(text.getAttribute('x')),y=Number(text.getAttribute('y'));
+    // Cancel the image reflection around each label's own pixel anchor.
+    // Its anchor still follows the image, while the glyph remains upright.
+    text.setAttribute('transform',`translate(${x} ${y}) scale(${sx} ${sy}) translate(${-x} ${-y})`);
+  }
+}
 function drawLine(overlay,start,end,width){
   overlay.querySelector('.profile-line-overlay')?.remove();
   if(!start)return;
@@ -19,6 +28,7 @@ function drawLine(overlay,start,end,width){
     const text=document.createElementNS(ns,'text');text.textContent=label;
     text.setAttribute('x',p.x+.5);text.setAttribute('y',p.y+.5);text.setAttribute('fill','#00dfff');text.setAttribute('font-size',Math.max(3,width/40));text.setAttribute('paint-order','stroke');text.setAttribute('stroke','#173c39');text.setAttribute('stroke-width',.3);group.append(text);
   }
+  orientLabels(overlay,globalThis.QCLImages?.orientation);
 }
 function renderPlot(root,kind,title,hasGold,result){
   const values=result.profiles[kind];if(!values)return;
@@ -44,5 +54,5 @@ function renderPlot(root,kind,title,hasGold,result){
   node('path',{d:path,fill:'none',stroke:'#137e6b','stroke-width':1.7});
 }
 
-globalThis.QCLLine={snapEnd,drawLine,renderPlot};
+globalThis.QCLLine={snapEnd,drawLine,renderPlot,orientLabels};
 })();

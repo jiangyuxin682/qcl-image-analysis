@@ -47,10 +47,7 @@ dependencies included, follow [Windows packaging](../packaging/README.md).
    separately in Section 7. Two references interpolate; more fit least squares.
 7. Calculate baseline correction separately, compare absorbance before and after
    correction, and inspect individual pixel fits.
-8. Inspect six stages with gold, or five without gold, using inferno. Different
-   bands have independent scales; each band's input/Fourier/rolling stages
-   share a scale, as do its two absorbance
-   stages. Draw CNR background and target ROIs shared across stages within the
+8. Inspect six stages with gold, or five without gold, using inferno. Every image has an independent colorbar calculated from its own values. Draw CNR background and target ROIs shared across stages within the
    dataset, or reuse the exact Section 6 analyte-free selection as background.
    Horizontal/vertical line profiles sample the same positions across stages.
 9. Optionally build a timelapse of the selected patterns, or click **Skip Timelapse**.
@@ -71,7 +68,9 @@ when available, with modification-time fallback recorded.
 
 ### Optional stages and live preview
 
-The Fourier and rolling-ball checkboxes independently enable each stage.
+The Fourier and rolling-ball checkboxes start unchecked in a new UI session
+and independently enable each stage. Imported projects and shared dataset
+settings retain their saved enabled flags.
 A disabled stage passes its input values through unchanged. Its diagnostic
 mask/gain is one; a bypassed rolling-ball background is an identity field,
 not an estimated physical background. Both enabled flags are exported.
@@ -90,7 +89,7 @@ Parameter edits automatically preview the current pattern and band after a
 processing function as batch processing, without changing committed arrays.
 Only one preview runs at a time; newer edits replace pending work and stale
 responses are discarded. Larger rolling-ball radii may take longer to update.
-The before/Fourier/rolling images share an input-signal scale. Use Process all
+The before/Fourier/rolling images each use their own colorbar limits. Use Process all
 involved bands to commit the settings before calculating absorbance and CNR.
 
 - Notch coordinates are `(fy, fx)` in cycles/pixel, unrelated to cm^-1. Their
@@ -134,7 +133,7 @@ This is a single-user in-memory session, not a persistent multi-user service.
 Section 8 CNR uses numerical values clipped to the current display percentile
 limits, before color mapping. The default 0–100 leaves finite values unchanged.
 The percentile setting applies to every selected pattern/band; the actual bounds
-follow each stage's shared display scale. No image-processing arrays are changed.
+follow each image’s independent display scale. No image-processing arrays are changed.
 Changing percentiles requires recalculating CNR before exporting. In multi-folder
 comparison, changing a folder's percentile automatically recalculates its CNR.
 
@@ -371,8 +370,8 @@ field (default `qcl-folder-comparison.zip`). Chinese names are supported; an
 omitted `.zip` is added, invalid filename characters are replaced, and a blank
 name uses the default. The browser determines the download location.
 
-Existing result CSV paths and
-metadata remain compatible; the ZIP additionally includes:
+Result CSVs use the descriptive filenames listed below. Metadata remains
+compatible, and older project filenames are accepted on import. The ZIP also includes:
 
 - `inputs/*.npy`: full, uncropped raw images as lossless float64 arrays. They
   cover selected patterns and involved bands only. These are the actual loaded
@@ -494,3 +493,120 @@ Each curve includes all selected patterns, including QC-flagged ones, in numeric
 pattern order. The horizontal axis uses actual pattern indices, preserving gaps
 in selection. Expand the values table below each panel to inspect the numbers.
 Changing the preview pattern does not change these across-pattern curves.
+
+## Image orientation, PNG downloads and background preview
+
+The Horizontal flip and Vertical flip controls are in Section 8 directly below
+Calculate CNR for all images. They apply only to that section's heatmaps and
+ROI/point/line overlays. Final comparison has its own independent controls.
+Other processing sections and timelapse/video exports retain normal orientation. Pointer selection is mapped
+back to original coordinates. Plots and colorbar text keep their normal
+orientation. Numerical arrays, CSV exports and saved ROI coordinates retain
+acquisition orientation. Each dataset tab keeps its own Section 8 flip settings;
+project ZIPs do not restore them.
+
+Each available Section 8 stage image has a Download current image · PNG button.
+The PNG includes the pattern/band/stage title, displayed CNR and background
+parameters, display limits, current orientation, color scale and ROI/line
+overlays. When a line profile is present, its plot and sampling-position details
+are included below the image in the same PNG. Text wraps and the export grows
+vertically to fit all information. The profile keeps normal axes and S-to-E
+ordering even when the heatmap is flipped. Selecting a background ROI immediately shows
+A_bg and sigma_bg (sample standard deviation, ddof=1), before selecting a target
+or calculating CNR. Reusing the Section 6 reference also previews these values.
+Background preview uses the same common finite pixels and percentile clipping
+as final CNR. It does not commit a CNR result or unlock result export.
+
+Stage CSV filenames now describe their contents:
+
+| Previous name | Exported name |
+| --- | --- |
+| raw.csv | Intensity_raw.csv |
+| reflectance.csv | Reflectance_gold_normalized.csv |
+| fourier.csv | Signal_Fourier_filtered.csv |
+| rolling.csv | Signal_flat_field_corrected.csv |
+| absorbance.csv | Abs_uncorrected.csv |
+| baseline.csv | Abs_baseline_corrected.csv |
+| linear_baseline.csv | Abs_fitted_linear_baseline.csv |
+| background.csv | Rolling_ball_background.csv |
+| gain.csv | Flat_field_gain.csv |
+
+Masks and reference coordinate filenames are unchanged. The importer accepts
+both these names and previous project ZIP names.
+
+
+## Image pixel axes
+
+All processing heatmaps show X (pixel) and Y (pixel) axes, including raw ROI
+inspection, normalization, cropping, live processing diagnostics, baseline
+inspection, Section 8, timelapse and final folder comparison. Pixel centers are
+zero-based (0 through width−1 / height−1); cropped images use crop-local
+coordinates. FFT images show their array pixel indices alongside the existing
+frequency annotations. Spectral and line-profile plots retain their physical
+axes. Image axes use the numerical array dimensions, not the enlarged preview
+PNG resolution, and adapt to the display size. Section 8 flips reverse tick
+positions while keeping text readable and original pixel coordinates intact.
+Section 8 PNG downloads and MP4 exports include the same pixel axes.
+
+
+## Independent image colorbars
+
+Every processing image uses only its own finite pixel values to calculate the
+selected percentile limits. This applies to previews, baseline before/after,
+Section 8 and Final comparison (by default). Timelapse/MP4 uses a single
+range across included patterns at the selected wavenumber and stage.
+Final comparison alone can optionally share limits across folders for the same
+selected stage; before/after stages are never pooled together. At 0–100 the limits are that image's
+minimum and maximum, apart from the explicit per-image zero-limit switch.
+Signed-difference diagnostics retain a symmetric range based on their own data;
+transmission masks retain their dimensionless 0–1 scale.
+
+CNR clipping and background previews use each individual stage's range. New
+projects record `cnr_contrast.scale_policy = per_image`. When an old ZIP is
+imported, historical CNR is first verified under its saved grouped-scale rule;
+current CNR is then recalculated with independent image scales. The verification
+report states this migration. Processing arrays and unadjusted CNR are unchanged.
+
+## Final comparison image tools
+
+Final comparison includes Horizontal flip and Vertical flip controls for all
+currently compared images, independent of the individual dataset tabs. Image,
+ROI and line overlays flip together; pixel tick positions follow the original
+coordinates and line selection maps clicks back to those coordinates.
+
+The Color map selector offers the same six maps as Section 8 and works with
+independent image colorbar limits. Color maps and flips do not alter
+CNR or the numerical arrays.
+
+Each available dataset image has Download current image · PNG. It exports the
+dataset name, pattern, wavenumber, processing stage/basis, CNR parameters and
+pixel counts, active color limits/map, pixel axes and ROI/line overlays. The
+dataset's current line profile and sampling information appear beneath the
+image in the same PNG. Pending profiles are calculated before export, and the
+plot keeps normal axes when the image is flipped.
+
+
+Line-profile S/E labels keep their normal text orientation when either or both
+flip controls are enabled. Their positions follow the selected image pixels.
+This applies to Section 8, Final comparison, newly drawn lines, existing lines
+and downloaded PNGs.
+
+
+Final comparison's **Use the same colorbar limits across folders · current stage
+only** defaults off. Automatic limits use the selected stage and wavenumber
+at each folder's selected pattern. Manual min/max values override these limits;
+**Use selected images’ min / max** restores automatic selection. Stage or
+wavenumber changes reset to automatic limits. Automatic limits follow pattern
+changes, while manual limits stay fixed. Per-folder percentiles and zero-limit
+controls are disabled while sharing is on and restored when it is off. Shared
+limits affect only the comparison display and downloaded PNGs, not processing
+arrays, CNR or the independent stage scales in Section 8.
+
+
+Section 9 uses one colorbar range for the entire video. At the default 0–100
+percentiles, its bounds are the finite minimum and maximum across the included
+patterns for the selected wavenumber and processing stage. Patterns outside the
+video range, unselected patterns, QC-excluded frames, other bands and other
+stages do not contribute. Custom percentiles apply to the combined frame values;
+the explicit zero-limit switch can still set the lower display bound to zero.
+The preview and exported MP4 retain the same limits on every frame.

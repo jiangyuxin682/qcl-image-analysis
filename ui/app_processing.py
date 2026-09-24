@@ -66,6 +66,7 @@ from qcl_analysis.roi import ROI
 from ui.app import render_data_png
 from ui.reproduction import (
     MAX_UPLOAD,
+    result_filename,
     coordinates,
     reproduce,
     resolved_parameters,
@@ -84,6 +85,16 @@ def display_limits(limits, payload):
 
 
 def render_processing_png(array, payload, *, limits=None, low=0, high=100):
+    if "display_min" in payload or "display_max" in payload:
+        if "display_min" not in payload or "display_max" not in payload:
+            raise ValueError("Provide both colorbar minimum and maximum.")
+        limits = (float(payload["display_min"]), float(payload["display_max"]))
+        if not all(np.isfinite(limits)) or limits[0] >= limits[1]:
+            raise ValueError("Colorbar limits must be finite and minimum must be less than maximum.")
+        # Explicit shared limits take precedence over per-image zero anchoring.
+        png, _, _ = render_data_png(array, limits=limits,
+                                    cmap=display_colormap(payload.get("cmap", "inferno")))
+        return png, *limits
     if limits is None:
         finite = array[np.isfinite(array)]
         limits = tuple(np.percentile(finite, [low, high])) if finite.size else (0.0, 1.0)
@@ -252,6 +263,7 @@ class ProcessingState:
         self.gold_pixels = {}
         self.n_pixels = 0
         self.qc_settings = {}
+        self.cnr_scale_policy = "per_image"
         self.qc = pd.DataFrame()
         self.on_roi = None
         self.on_rois = {}
@@ -754,17 +766,17 @@ class ProcessingState:
         low, high = float(payload.get("low", 0)), float(payload.get("high", 100))
         if not 0 <= low < high <= 100:
             raise ValueError("Display percentiles must satisfy 0 <= low < high <= 100.")
-        limits = self.limits(arrays, low, high)
         cards = []
         for title, array in zip(
             ("Before processing", "After Fourier", "After rolling ball"), arrays
         ):
             card_payload = {**payload, "colorbar_zero": title in payload["colorbar_zero_titles"]} if "colorbar_zero_titles" in payload else payload
-            png, lo, hi = render_processing_png(array, card_payload, limits=limits)
+            png, lo, hi = render_processing_png(array, card_payload, limits=self.limits([array], low, high))
             cards.append(
                 {
                     "title": title,
                     "png": base64.b64encode(png).decode(),
+                    "width": array.shape[1], "height": array.shape[0],
                     "vmin": lo,
                     "vmax": hi,
                 }
@@ -772,7 +784,6 @@ class ProcessingState:
         # Use the actual padded filtering spectra, not the Hann inspection FFT.
         before = np.log1p(np.abs(output.spectrum_before))
         after = np.log1p(np.abs(output.spectrum_after))
-        fft_limits = (0.0, max(float(before.max()), float(after.max()), 1e-12))
         axes = (
             f"fx: {output.fx[0]:.4f} to {output.fx[-1]:.4f}; "
             f"fy: {output.fy[0]:.4f} (top) to {output.fy[-1]:.4f} (bottom), cycles/pixel"
@@ -796,6 +807,7 @@ class ProcessingState:
                     "title": title,
                     "available": True,
                     "png": base64.b64encode(png).decode(),
+                    "width": array.shape[1], "height": array.shape[0],
                     "vmin": lo,
                     "vmax": hi,
                     "caption": caption,
@@ -805,7 +817,7 @@ class ProcessingState:
         diagnostic(
             "FFT before filtering",
             before,
-            fft_limits,
+            self.limits([before], low, high),
             "log(1 + FFT amplitude). Actual filtering FFT; no Hann window. " + axes,
         )
         diagnostic(
@@ -817,8 +829,8 @@ class ProcessingState:
         diagnostic(
             "FFT after filtering",
             after,
-            fft_limits,
-            "log(1 + FFT amplitude). Same scale as the input FFT. " + axes,
+            self.limits([after], low, high),
+            "log(1 + FFT amplitude). Independent image scale. " + axes,
         )
         removed_bound = max(float(np.max(np.abs(output.removed))), 1e-12)
         diagnostic(
@@ -831,7 +843,7 @@ class ProcessingState:
         diagnostic(
             "Estimated rolling-ball background",
             flat.background,
-            self.limits([output.filtered, flat.background], low, high),
+            self.limits([flat.background], low, high),
             "Estimated illumination field (input signal units). Correction divides by this field and rescales; it is not subtracted.",
             enabled,
         )
@@ -1100,7 +1112,41 @@ class ProcessingState:
                 "x": x.tolist(), "y": y.tolist(), "profiles": profiles,
                 "sampling": "bilinear", "position_unit": "pixels"}
 
-    def cnr(self, payload):
+    def background_stats(self, payload):
+        """Preview background statistics with the same clipping and validity as CNR."""
+        self.require("complete")
+        key = (payload["pattern"], integer(payload["wavenumber"], "Wavenumber"))
+        arrays = {k: a for k, a in self.stage_arrays(key).items() if a is not None}
+        common = np.logical_and.reduce([np.isfinite(a) for a in arrays.values()])
+        selected = np.zeros(common.shape, dtype=bool)
+        source = payload.get("background_source", "manual")
+        if source == "analyte_free":
+            pixels = self.r0_pixels[key]
+            selected[pixels[:, 0], pixels[:, 1]] = True
+        elif source == "manual":
+            roi = roi_from(payload["background"])
+            crop_image(common, roi)  # Validate bounds before slicing.
+            selected[roi.as_slices()] = True
+        else:
+            raise ValueError("Unknown background source.")
+        low, high = float(payload.get("low", 0)), float(payload.get("high", 100))
+        if not 0 <= low < high <= 100:
+            raise ValueError("CNR percentiles must satisfy 0 <= low < high <= 100.")
+        rows = []
+        for stage, array in arrays.items():
+            bounds = self.stage_display_limits(arrays, stage, low, high)
+            values = np.clip(array[selected & common], *bounds)
+            rows.append({"stage": stage, "background_mean": float(values.mean()) if values.size else None,
+                         "background_std": float(values.std(ddof=1)) if values.size >= 2 else None,
+                         "background_pixels": int(values.size),
+                         "excluded_background_pixels": int(selected.sum()-values.size),
+                         "contrast_low_percentile": low, "contrast_high_percentile": high,
+                         "status": "background_only" if values.size >= 2 else "insufficient_background_pixels"})
+        return {"records": rows}
+
+    def cnr(self, payload, *, scale_policy="per_image"):
+        if scale_policy not in {"per_image", "legacy_grouped"}:
+            raise ValueError("Unknown CNR scale policy.")
         self.require("complete")
         source = payload.get("background_source", "manual")
         if source not in {"manual", "analyte_free"}:
@@ -1121,7 +1167,7 @@ class ProcessingState:
                     raise ValueError("Calculate absorbance to save the analyte-free selection first.")
                 background_mask = np.zeros(self.crops[key].shape, dtype=bool)
                 background_mask[pixels[:, 0], pixels[:, 1]] = True
-            bounds = {name: self.stage_display_limits(arrays, name, low, high)
+            bounds = {name: (self.legacy_stage_limits if scale_policy == "legacy_grouped" else self.stage_display_limits)(arrays, name, low, high)
                       for name, array in arrays.items() if array is not None}
             # Preserve NaN/Inf so clipping cannot make an invalid pixel valid.
             adjusted = {name: None if array is None else
@@ -1137,6 +1183,7 @@ class ProcessingState:
                              "contrast_low_percentile": low, "contrast_high_percentile": high,
                              "contrast_vmin": limits[0], "contrast_vmax": limits[1],
                              "contrast_method": "clip_to_display_limits"})
+        self.cnr_scale_policy = scale_policy
         self.cnr_records, self.cnr_rois = (
             rows,
             {"background": asdict(bg) if bg else None, "target": asdict(target),
@@ -1146,6 +1193,10 @@ class ProcessingState:
         return {"records": rows, "rois": self.cnr_rois}
 
     def stage_display_limits(self, arrays, kind, low, high):
+        return self.limits([arrays[kind]], low, high)
+
+    def legacy_stage_limits(self, arrays, kind, low, high):
+        """Only used to verify historical ZIP CNR records, never for rendering."""
         signal = ("reflectance", "fourier", "rolling") if self.has_gold else ("raw", "fourier", "rolling")
         group = signal if kind in signal else ("absorbance", "baseline") if kind in {"absorbance", "baseline"} else (kind,)
         return self.limits([arrays[name] for name in group], low, high)
@@ -1231,6 +1282,11 @@ class ProcessingState:
             if array is None:
                 return {"available": False}
             limits = self.stage_display_limits(arrays, kind, low, high)
+        if payload.get("stats_only") in (True, "true", "1"):
+            finite = array[np.isfinite(array)]
+            return {"available": True,
+                    "data_min": float(finite.min()) if finite.size else None,
+                    "data_max": float(finite.max()) if finite.size else None}
         if payload.get("cnr_background_source") == "analyte_free":
             self.require("absorbed")
             if self.r0_roi is not None:
@@ -1324,11 +1380,14 @@ class ProcessingState:
         low, high = float(payload.get("low", 0)), float(payload.get("high", 100))
         if not 0 <= low < high <= 100:
             raise ValueError("Contrast percentiles must satisfy 0 <= low < high <= 100.")
+        # Pool only frames actually included, at this one band and stage.
         limits = display_limits(self.limits(arrays, low, high), payload)
         for f, a in zip(frames, arrays):
+            f["vmin"], f["vmax"] = limits
             png, _, _ = render_data_png(a, limits=limits,
                                         cmap=display_colormap(payload.get("cmap", "inferno")))
             f["png"] = base64.b64encode(png).decode()
+            f["width"], f["height"] = a.shape[1], a.shape[0]
             f["elapsed_seconds"] = (
                 f["timestamp"] - frames[0]["timestamp"]
                 if f["timestamp"] is not None and frames[0]["timestamp"] is not None
@@ -1359,8 +1418,9 @@ class ProcessingState:
             "kind": kind,
             "low": low,
             "high": high,
-            "vmin": limits[0],
-            "vmax": limits[1],
+            "vmin": frames[0]["vmin"],
+            "vmax": frames[0]["vmax"],
+            "scale_policy": "same_stage_video_frames",
         }
         return self.last_video
 
@@ -1424,7 +1484,8 @@ class ProcessingState:
             "cnr_formula": "abs(mean(target)-mean(background))/std(background,ddof=1)",
             "cnr_contrast": {
                 "method": "clip_to_display_limits; no RGB conversion or quantization",
-                "scope": "Percentiles apply to all selected patterns/bands; bounds match each stage's displayed shared scale.",
+                "scope": "Percentiles are calculated independently for each image.",
+                "scale_policy": self.cnr_scale_policy,
                 "default": "0–100: no clipping of finite values",
                 "interpretation": "Display-adjusted CNR; clipping can reduce background noise and inflate CNR.",
                 "records": self.cnr_records,
@@ -1488,7 +1549,7 @@ class ProcessingState:
                     if array is not None:
                         output = io.StringIO()
                         np.savetxt(output, array, delimiter=",")
-                        z.writestr(f"{folder}/{name}.csv", output.getvalue())
+                        z.writestr(f"{folder}/{result_filename(name)}", output.getvalue())
             write_project(z, self, metadata, clean_json)
         return buffer.getvalue()
 
@@ -1597,6 +1658,8 @@ class Handler(BaseHTTPRequestHandler):
             "/compare": ("compare.html", "text/html; charset=utf-8"),
             "/compare.js": ("compare.js", "text/javascript; charset=utf-8"),
             "/line_profile.js": ("line_profile.js", "text/javascript; charset=utf-8"),
+            "/pixel_axes.js": ("pixel_axes.js", "text/javascript; charset=utf-8"),
+            "/image_tools.js": ("image_tools.js", "text/javascript; charset=utf-8"),
             "/uploads.js": ("uploads.js", "text/javascript; charset=utf-8"),
         }
         try:
@@ -1722,6 +1785,7 @@ class Handler(BaseHTTPRequestHandler):
                 "/api/calculate": session.calculate,
                 "/api/baseline": session.correct_baseline,
                 "/api/cnr": session.cnr,
+                "/api/background-stats": session.background_stats,
                 "/api/line-profile": session.line_profile,
                 "/api/baseline-pixel": session.baseline_pixel,
                 "/api/timelapse": session.timelapse,

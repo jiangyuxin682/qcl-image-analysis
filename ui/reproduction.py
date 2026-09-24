@@ -17,6 +17,18 @@ import pandas as pd
 
 FORMAT = 'qcl-processing-project'
 VERSION = 1
+RESULT_FILENAMES = {
+    'raw': 'Intensity_raw', 'reflectance': 'Reflectance_gold_normalized',
+    'fourier': 'Signal_Fourier_filtered', 'rolling': 'Signal_flat_field_corrected',
+    'absorbance': 'Abs_uncorrected', 'baseline': 'Abs_baseline_corrected',
+    'linear_baseline': 'Abs_fitted_linear_baseline',
+    'background': 'Rolling_ball_background', 'gain': 'Flat_field_gain',
+}
+
+
+def result_filename(stage):
+    return RESULT_FILENAMES.get(stage, stage) + '.csv'
+
 MAX_UPLOAD = 1024**3
 MAX_EXPANDED = 4 * 1024**3
 RTOL, ATOL = 1e-10, 1e-12
@@ -76,7 +88,7 @@ def environment():
 
 
 def write_project(archive, state, metadata, clean_json):
-    """Extend the existing human-readable export without changing legacy paths."""
+    """Add full inputs and a verification manifest to the human-readable results."""
     inputs = []
     for index, (key, array) in enumerate(state.raw.items()):
         name = f'inputs/image_{index:06d}.npy'
@@ -296,9 +308,10 @@ def reproduce(data, progress=lambda **values: None):
         state.correct_baseline({})
         progress(status='Recalculating CNR', completed=5, total=7)
         cnr = meta['cnr_contrast']['records']
+        scale_policy = meta['cnr_contrast'].get('scale_policy', 'legacy_grouped')
         if cnr:
             state.cnr({**meta['cnr_rois'], 'low': cnr[0]['contrast_low_percentile'],
-                       'high': cnr[0]['contrast_high_percentile']})
+                       'high': cnr[0]['contrast_high_percentile']}, scale_policy=scale_policy)
         progress(status='Verifying results', completed=6, total=7)
         checks = []
         for key in state.crops:
@@ -316,7 +329,9 @@ def reproduce(data, progress=lambda **values: None):
             for stage, array in arrays.items():
                 if array is None:
                     continue
-                name = f'{folder}/{stage}.csv'
+                name = f'{folder}/{result_filename(stage)}'
+                if name not in archive.namelist():
+                    name = f'{folder}/{stage}.csv'  # Earlier project exports.
                 expected = np.loadtxt(io.BytesIO(archive.read(name)), delimiter=',', ndmin=2)
                 checks.append(compare_array(name, array, expected))
         checks += compare_records('CNR', clean_json(state.cnr_records), cnr)
@@ -336,6 +351,12 @@ def reproduce(data, progress=lambda **values: None):
                   'environment_differences': differences, 'saved_environment': saved_environment,
                   'current_environment': current_environment,
                   'selection_policy': recipe['selection_policy']}
+        if cnr and scale_policy == 'legacy_grouped':
+            # Verify the archive under its historical rule, then use independent
+            # image ranges for the current UI and subsequent project exports.
+            state.cnr({**meta['cnr_rois'], 'low': cnr[0]['contrast_low_percentile'],
+                       'high': cnr[0]['contrast_high_percentile']})
+            report['cnr_scale_migration'] = 'Historical CNR verified with grouped scales; current CNR recalculated with per-image scales.'
         state.reproduction_report = report
         state._reproduction_inputs = work  # Keep generated CSVs available for all inspectors.
         progress(status='Reproduction complete', completed=7, total=7)

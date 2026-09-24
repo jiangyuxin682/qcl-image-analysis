@@ -53,7 +53,6 @@ def test_live_diagnostics_follow_actual_filter_and_background(acquisition):
     preview = state.preview(payload)
     diagnostics = preview["diagnostics"]
     assert len(diagnostics) == 7
-    assert diagnostics[0]["vmax"] == diagnostics[2]["vmax"]
     assert (diagnostics[1]["vmin"], diagnostics[1]["vmax"]) == (0.0, 1.0)
     output, flat = state.process_image(state.crops[("pattern0", 1658)], payload)
     arrays = [
@@ -65,7 +64,12 @@ def test_live_diagnostics_follow_actual_filter_and_background(acquisition):
         flat.gain,
         output.filtered - flat.corrected,
     ]
+    for card, array in zip(preview['images'], [state.crops[("pattern0", 1658)], output.filtered, flat.corrected]):
+        assert (card['vmin'], card['vmax']) == state.limits([array])
+    for index in (0, 2, 4, 5):
+        assert (diagnostics[index]['vmin'], diagnostics[index]['vmax']) == state.limits([arrays[index]])
     for card, array in zip(diagnostics, arrays):
+        assert (card["height"], card["width"]) == array.shape
         png, _, _ = render_data_png(array, limits=(card["vmin"], card["vmax"]))
         assert base64.b64decode(card["png"]) == png
     payload["fourier"]["cutoff_x"] = 0.05
@@ -420,7 +424,7 @@ def test_complete_pipeline_and_export(acquisition):
         assert metadata["processed_wavenumbers"] == [1601, 1658, 1702]
         assert "cnr_summary.csv" in z.namelist()
         saved = np.loadtxt(
-            io.StringIO(z.read("pattern0/1658cm-1/baseline.csv").decode()),
+            io.StringIO(z.read("pattern0/1658cm-1/Abs_baseline_corrected.csv").decode()),
             delimiter=",",
         )
         np.testing.assert_allclose(saved, expected, atol=1e-14)
@@ -549,6 +553,7 @@ def test_timelapse_uses_selected_stage(acquisition, kind):
     from ui.app import render_data_png
     import base64
     for frame, array in zip(result["frames"], arrays):
+        assert (frame["vmin"], frame["vmax"]) == limits
         expected, _, _ = render_data_png(array, limits=limits)
         assert base64.b64decode(frame["png"]) == expected
     assert "absorbance" not in result["extrema_label"]
@@ -1039,3 +1044,94 @@ def test_signal_trends_before_absorbance_and_without_gold(acquisition):
     assert result['has_gold'] is False
     assert all(r['i_goldref'] is None for r in result['records'])
     assert result['records'][0]['median_full'] == np.median(state.raw[('pattern0', 1658)])
+
+
+@pytest.mark.parametrize('source', ['manual', 'analyte_free'])
+@pytest.mark.parametrize('limits', [(0, 100), (10, 80)])
+def test_background_preview_matches_final_cnr_without_committing(acquisition, source, limits):
+    state = complete(acquisition)
+    payload = {'pattern': 'pattern0', 'wavenumber': 1658,
+               'background_source': source,
+               'background': {'x_min': 0, 'x_max': 3, 'y_min': 0, 'y_max': 3},
+               'low': limits[0], 'high': limits[1]}
+    # The same finite-pixel intersection must apply before a target is selected.
+    state.absorbance[('pattern0', 1601)][0, 0] = np.nan
+    preview = state.background_stats(payload)['records']
+    assert state.cnr_records == []
+    assert state.cnr_rois is None
+    rows = state.cnr({**payload, 'target': {'x_min': 8, 'x_max': 11, 'y_min': 8, 'y_max': 11}})['records']
+    for result in preview:
+        final = next(r for r in rows if r['pattern'] == 'pattern0' and r['wavenumber'] == 1658 and r['stage'] == result['stage'])
+        for field in ['background_mean', 'background_std', 'background_pixels', 'excluded_background_pixels']:
+            assert result[field] == pytest.approx(final[field])
+    with pytest.raises(ValueError):
+        state.background_stats({**payload, 'low': 90, 'high': 10})
+
+
+def test_comparison_extrema_and_explicit_limits_are_display_only(acquisition):
+    state = complete(acquisition)
+    payload = {'pattern': 'pattern0', 'wavenumber': 1658, 'kind': 'baseline'}
+    array = state.stage_arrays(('pattern0', 1658))['baseline']
+    original = array.copy()
+    bounds = state.image({**payload, 'stats_only': True, 'low': 20, 'high': 80, 'colorbar_zero': True})
+    assert bounds['data_min'] == np.nanmin(array)
+    assert bounds['data_max'] == np.nanmax(array)
+    image = state.image({**payload, 'display_min': -2, 'display_max': 3, 'colorbar_zero': True, 'low': 20, 'high': 80})
+    assert (image['vmin'], image['vmax']) == (-2, 3)
+    expected, _, _ = render_data_png(array, limits=(-2, 3))
+    assert base64.b64decode(image['png']) == expected
+    np.testing.assert_array_equal(array, original)
+    assert not state.cnr_records
+    for limits in [{'display_min': 0}, {'display_min': 2, 'display_max': 1},
+                   {'display_min': 1, 'display_max': 1}, {'display_min': float('nan'), 'display_max': 1},
+                   {'display_min': 0, 'display_max': float('inf')}]:
+        with pytest.raises(ValueError):
+            state.image({**payload, **limits})
+
+
+def test_shared_limits_are_retained_for_an_all_invalid_image():
+    from ui.app_processing import render_processing_png
+    _, low, high = render_processing_png(np.full((2, 3), np.nan), {'display_min': -4, 'display_max': 8})
+    assert (low, high) == (-4, 8)
+
+
+@pytest.mark.parametrize('percentiles', [(0, 100), (10, 90)])
+def test_every_stage_colorbar_uses_only_its_own_pixels(acquisition, percentiles):
+    state = complete(acquisition)
+    key = ('pattern0', 1658)
+    arrays = state.stage_arrays(key)
+    for kind, array in arrays.items():
+        if array is None:
+            continue
+        result = state.image({'pattern': key[0], 'wavenumber': key[1], 'kind': kind,
+                              'low': percentiles[0], 'high': percentiles[1]})
+        assert (result['vmin'], result['vmax']) == pytest.approx(state.limits([array], *percentiles))
+    # A different stage's extreme values must never affect this image's scale.
+    before = state.stage_display_limits(arrays, 'absorbance', *percentiles)
+    arrays['baseline'] = np.full_like(arrays['baseline'], 1e9)
+    assert state.stage_display_limits(arrays, 'absorbance', *percentiles) == before
+
+
+@pytest.mark.parametrize('selection', ['all', 'range', 'qc'])
+def test_video_limits_pool_only_included_patterns_at_selected_band_and_stage(acquisition, selection):
+    state = complete(acquisition)
+    state.baselines[('pattern0', 1658)].corrected[:] = np.linspace(1, 3, 224).reshape(14, 16)
+    state.baselines[('pattern1', 1658)].corrected[:] = np.linspace(-5, 10, 224).reshape(14, 16)
+    # Extremes in another stage or wavenumber must not enter the video range.
+    state.absorbance[('pattern0', 1658)][:] = 1e8
+    state.absorbance[('pattern0', 1601)][:] = -1e8
+    payload = {'wavenumber': 1658, 'kind': 'baseline'}
+    if selection == 'range':
+        payload.update(start=0, end=0)
+    elif selection == 'qc':
+        state.qc.loc[state.qc.pattern == 'pattern1', 'frame_valid'] = False
+        payload['skip_invalid'] = True
+    video = state.timelapse(payload)
+    expected = (-5, 10) if selection == 'all' else (1, 3)
+    assert (video['vmin'], video['vmax']) == expected
+    assert len(video['frames']) == (2 if selection == 'all' else 1)
+    for frame in video['frames']:
+        assert (frame['vmin'], frame['vmax']) == expected
+        array = state.baselines[(frame['pattern'], 1658)].corrected
+        png, _, _ = render_data_png(array, limits=expected)
+        assert base64.b64decode(frame['png']) == png
