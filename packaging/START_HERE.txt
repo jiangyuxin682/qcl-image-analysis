@@ -1,98 +1,12 @@
-QCL Processing Workbench - Windows x64
+QCL Processing Workbench documentation
 ======================================
 
-1. Extract the entire ZIP to a folder on your computer.
-2. Double-click "QCL Processing.exe".
-3. Your browser opens the analysis interface. Use your own local data path.
+The supported user setup is Fork -> Clone -> install Python 3.12 in the
+terminal -> create .venv -> install dependencies -> launch.
 
-Python, VS Code, Conda and FFmpeg do not need to be installed.
-Keep the _internal folder beside the EXE. Do not run the EXE from inside a ZIP.
+Repository: https://github.com/jiangyuxin682/qcl-image-analysis
+Open ui/INSTALLATION.md in the repository for Windows and macOS commands.
+Open ui/QUICKSTART.md for the processing workflow, exports and reproduction.
 
-The small QCL Processing window controls the app:
-  Open analysis UI - reopen the browser without restarting the session.
-  Quit - stop the app. Export your results first; sessions live in memory.
-Closing only the browser does not stop the app. Closing the controller does.
-
-The app runs on this computer only. The default address is
-http://127.0.0.1:8766; if occupied, the app chooses another available port.
-Each new app process has its own session; keep using its displayed address.
-
-Input: lineScan_<integer wavenumber>_0invcm.csv files in pattern folders.
-All bands in a pattern should use matching image dimensions.
-
-Logs: %LOCALAPPDATA%\QCL Processing\app.log
-If the app fails to start, provide that log when reporting the issue.
-
-BUILD_CHECK.json records checks run inside this executable during packaging.
-BUILD_DEPENDENCIES.txt records the build's dependency versions.
-THIRD_PARTY contains notices for included components.
-
-Target: Windows 10/11, 64-bit Intel/AMD. Windows ARM is not a tested target.
-This build is not code-signed; Windows may display an unknown-publisher prompt.
-
-FIRST ANALYSIS
-==============
-Select a local acquisition/stacks/pattern folder, or select all needed CSV
-bands from one pattern. Input CSVs must be non-empty 2D numeric matrices with
-no column headers, row labels, NaN or infinity.
-
-Section 1: Import files and detect wavenumbers.
-Section 2: Select center bands and patterns. For each center, enable baseline
-           only if appropriate reference bands exist. Enabled centers need at
-           least two distinct references bracketing the center.
-Section 3: Choose whether a gold reference exists; calculate normalization or
-           skip it. Check the selected gold pixels if using normalization.
-Section 4: Draw and commit the on-MS processing region.
-Section 5: Fourier and rolling-ball are optional and default off. Click
-           Process all involved bands even if both are disabled.
-Section 6: Select an analyte-free spatial reference and calculate absorbance.
-Section 7: Calculate baseline for enabled centers. If all centers skip it,
-           continue directly to CNR from Section 6.
-Section 8: Select background and target, then Calculate CNR for all images.
-           Flips affect display only. Download current image saves the image
-           and its information, with a line plot if one is selected.
-Section 9: Optional timelapse/MP4, or Skip Timelapse.
-Section 10: Choose export contents and download the processing project ZIP.
-
-SAVING AND REOPENING
-===================
-Default export is Lightweight reproducible settings. It keeps required
-parameters and selections but DOES NOT include full raw input images.
-Keep the matching original raw data with this ZIP for later reproduction.
-Choose Complete reproducible project, or Include full raw input images,
-if the ZIP should contain the inputs needed to recalculate independently.
-Stage CSVs, auxiliary arrays and summary tables are selectable.
-Download PNGs and MP4 separately; line profiles and videos are not restored
-as saved UI state. Export before quitting or reloading the workspace.
-
-To reopen: Import processing ZIP -> Reproduce original processing.
-For a lightweight project choose the matching local raw folder/CSV files.
-For a project containing raw arrays choose Raw images inside the ZIP.
-Wait for recalculation and inspect the verification report.
-Project import limits: 1 GiB compressed, 4 GiB expanded.
-
-Apply saved settings to new raw data is a different operation: choose new
-raw data, then review Section 3 and select new spatial ROIs before processing.
-It does not reproduce the old result or reuse old spatial selections.
-
-MULTIPLE FOLDERS
-================
-Enable Compare multiple folders in dataset tabs and add each dataset.
-Double-click a tab name to rename it; use its x button to remove that tab.
-Removing a tab does not delete the original files on disk.
-Sharing defaults: Section 2 OFF, Section 3 ON, Section 5 OFF, Section 6 ON.
-Turn off a section's sharing switch if folders need different parameters.
-Spatial selections remain independent.
-
-Final comparison requires current CNR results in each dataset. It defaults
-to Choose wavenumber per folder. Select one image stage and each folder's
-pattern/band, then Refresh comparison. Optional shared color limits use the
-currently selected images only; manual minimum/maximum are also available.
-If blocked, Why comparison is blocked lists the affected folders/sections
-and offers Open Section buttons. Resolve sharing conflicts or recompute
-incomplete results before trying again.
-
-Full source documentation (request it from the distributor if not included):
-  ui/INSTALLATION.md - beginner macOS/Windows setup and troubleshooting
-  ui/QUICKSTART.md - step-by-step current Processing UI guide
-  ui/README_PROCESSING.md - detailed processing reference
+This file is retained as an internal packaging resource. The user guide does
+not require a prebuilt executable or build-kit archive.

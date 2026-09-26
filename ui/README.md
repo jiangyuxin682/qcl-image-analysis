@@ -9,33 +9,26 @@ A local, browser-based UI for the `03_raw_to_absorbance.ipynb` workflow. It
 uses the existing `qcl_analysis` package for indexing, QC, reflectance, cropping,
 R0, and absorbance calculations.
 
-## First-time setup
+## Setup and launch
 
-New users: follow the [macOS / Windows installation guide](INSTALLATION.md)
-first, including Python 3.12 and dependencies. Then use the legacy launchers below
-instead of the Processing launcher.
+Complete the same [Fork/Clone installation guide](INSTALLATION.md) used by the
+Processing Workbench. This interface reuses that `.venv`; no separate setup is needed.
+From the project root, launch the legacy interface with:
 
-- macOS: double-click `setup_macos.command`.
-- Windows: double-click `setup_windows.bat`.
+Windows PowerShell:
 
-The setup creates a project-local `.venv` and installs the project with its UI
-dependencies. Python 3.12 is required.
-
-## Run
-
-- macOS: double-click `launch_macos.command`.
-- Windows: double-click `launch_windows.bat`.
-
-Or, from the repository root with the project environment active
-(use `.venv/bin/python` on macOS or `.\.venv\Scripts\python.exe` on Windows
-in place of `python` if it is not active):
-
-```bash
-python ui/app.py
+```powershell
+.\.venv\Scripts\python.exe ui\app.py
 ```
 
-The app opens at <http://127.0.0.1:8765>. All processing stays on the local
-computer. Press `Ctrl+C` in the terminal to stop it.
+macOS:
+
+```bash
+.venv/bin/python ui/app.py
+```
+
+The app opens at <http://127.0.0.1:8765>. Processing stays on the local computer.
+Export before pressing Ctrl+C in the terminal to stop it.
 
 ## Workflow
 

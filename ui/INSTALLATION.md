@@ -1,98 +1,148 @@
-# Install QCL Processing Workbench from scratch: macOS / Windows
+# Install and update QCL Processing Workbench
 
-After installation, follow the [user guide](QUICKSTART.md) to process your first dataset. This guide covers the current ten-section interface and assumes no programming experience. Button names match the English interface.
+Use this single workflow on both systems: **Fork → Clone → install Python 3.12 in a terminal → create `.venv` → install dependencies → launch**. Windows uses PowerShell and WinGet; macOS uses zsh and Homebrew. All commands below are run locally, not on GitHub.
 
-## 1. Identify the files you received
+You need a GitHub account, VS Code, an internet connection for installation, and access to the [upstream repository](https://github.com/jiangyuxin682/qcl-image-analysis). Install VS Code from its [official website](https://code.visualstudio.com/) if necessary. A processing ZIP exported by the app contains analysis settings/results, not the software.
 
-| What you received | How to use it |
-| --- | --- |
-| Source folder containing `pyproject.toml`, `src`, and `ui` | Follow the macOS or Windows source installation below |
-| Windows application ZIP containing `QCL Processing.exe` and `_internal` | Follow Section 4; no Python installation is needed |
-| A processing project ZIP exported from the app | This is an analysis project, not an installer; start the app before importing it |
-| `QCL-Processing-Windows-BuildKit.zip` | This contains build sources, not a ready-to-run EXE; you can run it using the Windows source instructions |
+Copy commands one line at a time. Wait for each to finish successfully before continuing. Do not type commands at a Python `>>>` prompt; enter `exit()` first if you see one. Skip installation steps for tools that are already installed at the required version. Do not copy another computer's `.venv`.
 
-Obtain the **complete source ZIP** from the maintainer, or choose **Code → Download ZIP** in the [project repository](https://github.com/jiangyuxin682/qcl-image-analysis) if you have access. Extract everything before continuing. Do not download only one `.py` file. You can keep the project under Documents; keep raw data and exported results in separate folders.
+## 1. Fork the repository (both systems)
 
-Paths below are examples: substitute the actual location of your extracted project. Copy commands one line at a time and press Enter. Continue only after the preceding command finishes without an error. Do not copy surrounding explanatory text. A terminal is the operating system's command window, not a web page or Python's `>>>` prompt. If you see `>>>`, enter `exit()` before running these commands.
+1. Sign in to your GitHub account and open the upstream repository above.
+2. Click **Fork → Create a new fork**.
+3. Choose your account as Owner, keep the repository name, and click **Create fork**.
+4. In your fork, click **Code → HTTPS** and copy its URL. It should look like `https://github.com/YOUR-USERNAME/qcl-image-analysis.git`.
 
-## 2. macOS source installation
+If the repository is private, you need access and permission to fork. Only code pushed to GitHub is available to you; unpublished changes on another computer are not included.
 
-### 2.1 Install Python 3.12
+## 2. Prepare Git in the VS Code terminal
 
-This project requires **Python >=3.12 and <3.13**. Python 3.13/3.14 cannot substitute for 3.12. Do not modify the Python supplied with macOS.
+Open VS Code and choose **Terminal → New Terminal**. Use PowerShell on Windows and zsh on macOS. If installing a tool changes PATH, close all VS Code windows and reopen the app before checking it again.
 
-1. Open the [official Python 3.12.10 download page](https://www.python.org/downloads/release/python-31210/). Under Files, select **macOS 64-bit universal2 installer**, which supports Intel and Apple Silicon Macs. Version 3.12.10 provides a traditional installer; it is not the latest security revision. If you already have a newer 3.12.x environment, you can use it.
-2. Open the downloaded `.pkg` and complete the installation wizard.
-3. Press Command + Space, search for **Terminal**, and open it. Enter:
+### Windows
 
-```bash
-python3.12 --version
+Check Git:
+
+```powershell
+git --version
 ```
 
-Continue when you see `Python 3.12.x`. If the command is not found, reopen Terminal and check that installation completed.
+If Git is not found, check WinGet:
 
-### 2.2 Open the project folder in Terminal
-
-Type `cd `, including the trailing space, drag the extracted project folder from Finder into Terminal, and press Enter. Alternatively, enter its actual path, for example:
-
-```bash
-cd "$HOME/Documents/qcl-image-analysis"
-ls
+```powershell
+winget --version
 ```
 
-The listing should contain `pyproject.toml`, `src`, and `ui`. If it does not, correct the folder path before continuing.
+If WinGet is missing, install or update **App Installer** in Microsoft Store, then restart VS Code. WinGet is distributed with App Installer; see [Microsoft's instructions](https://learn.microsoft.com/en-us/windows/package-manager/winget/). If your organization blocks installation, ask its IT administrator to enable it.
 
-### 2.3 Create the environment and install dependencies
+Install Git if needed:
 
-```bash
-python3.12 -m venv .venv
-.venv/bin/python -m pip install --upgrade pip
-.venv/bin/python -m pip install -e ".[ui]"
-.venv/bin/python -m pip check
+```powershell
+winget install --id Git.Git --exact --source winget
 ```
 
-`.venv` is a dedicated Python environment for this project. Finder may hide it by default; that is normal. The first installation downloads dependencies, so wait for the command prompt to return. The final command should report `No broken requirements found.`
+Complete any prompts, restart VS Code, and run `git --version` again.
 
-Alternatively, run `zsh ui/setup_macos.command` from the same project folder instead of the four commands above. You only need one installation method.
+### macOS
 
-### 2.4 Start the app
+Check Homebrew:
 
 ```bash
-.venv/bin/python ui/app_processing.py
+brew --version
 ```
 
-Your browser should open **http://127.0.0.1:8766** automatically. If it does not, paste that address into your browser. The **QCL Processing Workbench** import screen indicates a successful launch. It is normal for Terminal to remain occupied by server logs; keep it open while using the app.
+If it is not installed, run the installation command from the [Homebrew website](https://brew.sh/):
 
-For later sessions, return to the same folder and run the launch command again, or use `zsh ui/launch_processing_macos.command`. Reinstallation is not required. If double-clicking the `.command` file fails because it is not executable, run `chmod +x ui/launch_processing_macos.command` from the project root and retry. Launching through `zsh` does not require that step.
+```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+```
 
-## 3. Windows source installation
+Read and follow the prompts, including any Command Line Tools installation. When prompted for your Mac login password, typing may show no characters; this is normal. Run the exact **Next steps** commands printed by the installer to add Homebrew to your shell environment. The installation prefix differs between Apple Silicon and Intel Macs, so do not guess the path. Restart VS Code and verify `brew --version`. Check Homebrew's current macOS requirements if installation reports an unsupported system.
 
-These instructions target Windows 10/11 on Intel/AMD 64-bit computers. Windows ARM has not been validated for this project's application distribution.
+Check Git:
 
-### 3.1 Install Python 3.12
+```bash
+git --version
+```
 
-1. Open the [official Python 3.12.10 download page](https://www.python.org/downloads/release/python-31210/). In the **Files table**, choose **Windows installer (64-bit)**, not the embeddable package or source tarball. Version 3.12.10 provides a traditional installer; an existing newer 3.12.x environment also works.
-2. Open the installer, select **Add python.exe to PATH**, and retain the pip, Python launcher (`py`), and Tcl/Tk components. Complete installation.
-3. Search for **PowerShell** in the Start menu and open a new window. Enter:
+If Git is unavailable, install it, then verify:
+
+```bash
+brew install git
+git --version
+```
+
+## 3. Clone your fork (both systems)
+
+1. In VS Code, press **Ctrl + Shift + P** on Windows or **Command + Shift + P** on macOS.
+2. Select **Git: Clone** and paste your fork's HTTPS URL from step 1.
+3. Select a parent folder such as Documents; Git creates a `qcl-image-analysis` subfolder.
+4. Complete GitHub sign-in if requested, then click **Open** when cloning finishes.
+5. If VS Code shows Restricted Mode, trust the folder only after confirming this is the intended repository.
+
+The Explorer should show `pyproject.toml`, `src`, and `ui`. If you already cloned this fork, open that folder rather than cloning it again.
+
+## 4. Install Python 3.12
+
+Open **Terminal → New Terminal** in the project. The project requires **Python >=3.12 and <3.13**. A VS Code Python extension does not install the interpreter, and a different Python version is not a substitute.
+
+### Windows
+
+Check the required version:
 
 ```powershell
 py -3.12 --version
 ```
 
-You should see `Python 3.12.x`. If `py` is not found, reopen PowerShell. If it still fails, use the installer's Modify/Repair options to check the launcher. Do not substitute a `python` command without checking its version.
-
-### 3.2 Open the project folder in PowerShell
-
-Right-click the source ZIP and choose **Extract All**. In File Explorer, open the extracted folder containing `pyproject.toml`. Click the address bar and copy its path. In PowerShell, enter the following, replacing the quoted path:
+If unavailable, install it:
 
 ```powershell
-Set-Location "C:\Users\YourName\Documents\qcl-image-analysis"
+winget install --id Python.Python.3.12 --exact --source winget
+```
+
+Finish installation prompts, close all VS Code windows, reopen the project, and open a new terminal. Verify again:
+
+```powershell
+py -3.12 --version
+```
+
+Continue only when it prints `Python 3.12.x`. If the launcher is still unavailable after restarting, retain the installation output and resolve that problem before proceeding. The package identifier is recorded in [Microsoft's WinGet manifests](https://github.com/microsoft/winget-pkgs/tree/master/manifests/p/Python/Python/3/12).
+
+### macOS
+
+Check the required version:
+
+```bash
+python3.12 --version
+```
+
+If unavailable, install it through Homebrew:
+
+```bash
+brew install python@3.12
+```
+
+Restart VS Code, reopen the project, and verify:
+
+```bash
+python3.12 --version
+```
+
+Continue only when it prints `Python 3.12.x`. Use the versioned command, not the macOS system Python. See the [Homebrew Python 3.12 formula](https://formulae.brew.sh/formula/python@3.12).
+
+## 5. Create the project environment and install dependencies
+
+Run commands from the **project root containing `pyproject.toml`**, not inside `ui`. Each command must succeed before the next one. `.venv` keeps the project's dependencies separate; activation is not needed.
+
+### Windows PowerShell
+
+Confirm the folder contents:
+
+```powershell
 Get-ChildItem
 ```
 
-The listing should contain `pyproject.toml`, `src`, and `ui`. Documents may be under OneDrive on your computer; use the actual path shown in File Explorer.
-
-### 3.3 Create the environment and install dependencies
+Then run:
 
 ```powershell
 py -3.12 -m venv .venv
@@ -101,107 +151,120 @@ py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip check
 ```
 
-The last command should report `No broken requirements found.` These commands call the environment's Python directly: **you do not need Activate.ps1 or a change to PowerShell execution policy**. See the [Python virtual environment documentation](https://docs.python.org/3.12/library/venv.html).
+### macOS terminal
 
-Alternatively, double-click `setup_windows.bat` in the project's `ui` folder. Resolve any errors before proceeding; a Done message alone does not establish that every installation step succeeded.
+Confirm the folder contents:
 
-### 3.4 Start the app
+```bash
+ls
+```
+
+Then run:
+
+```bash
+python3.12 -m venv .venv
+.venv/bin/python -m pip install --upgrade pip
+.venv/bin/python -m pip install -e ".[ui]"
+.venv/bin/python -m pip check
+```
+
+The final command should report **No broken requirements found.** There is no need to run Activate.ps1 or change PowerShell execution policy. Finder may hide `.venv`; that is normal.
+
+The install command uses [pyproject.toml](../pyproject.toml) to install NumPy, SciPy, pandas, Matplotlib, PyYAML, scikit-image, and Pillow. Do not install these individually. Conda, Node.js, and Jupyter are not needed for normal use. Development/notebook extras are described in the [README](../README.md).
+
+## 6. Launch and use the workbench
+
+Windows:
 
 ```powershell
 .\.venv\Scripts\python.exe ui\app_processing.py
 ```
 
-Your browser should open **http://127.0.0.1:8766**. Open that address manually if necessary. Keep PowerShell open while working.
+macOS:
 
-For subsequent sessions, double-click `ui\launch_processing_windows.bat`, or return to the project folder and run the launch command above. You do not need to reinstall each time.
+```bash
+.venv/bin/python ui/app_processing.py
+```
 
-## 4. Using an existing Windows application package
+The browser normally opens **http://127.0.0.1:8766** automatically. If it does not, open that address manually. Seeing the import screen confirms startup. Keep the terminal running while using the app; ongoing server output is normal.
 
-If the maintainer supplied a **built and checked Windows application ZIP**:
+Follow the [user guide](QUICKSTART.md) for Sections 1–10. Export before stopping the app or refreshing the workspace. **Lightweight exports require matching original raw data for reproduction**, so keep the original files. Sessions live in memory and are not automatically saved.
 
-1. Right-click it and choose Extract All into a normal folder.
-2. Keep `QCL Processing.exe` beside the entire `_internal` folder. Do not copy just the EXE.
-3. Double-click the EXE. A small controller opens your browser and displays the current address. If the default port is occupied, the packaged app selects another port.
-4. Use **Open analysis UI** to reopen the browser. Export your work before choosing **Quit**.
+## 7. Start again and stop
 
-This package includes Python, runtime dependencies, and FFmpeg. Updating source files does not update an older EXE; obtain a new build from the maintainer. The package may be unsigned; proceed through an operating-system warning only after confirming its trusted source. Maintainer instructions are in [Windows packaging](../packaging/README.md).
+For later sessions, open the same project in VS Code, open its terminal, and run only the launch command from step 6. No new fork, clone, environment, or dependency installation is needed.
 
-## 5. What the dependencies do
+Use the explicit `.venv` interpreter path. A bare `python ui/app_processing.py` may use another environment and fail with `ModuleNotFoundError`.
 
-`pip install -e ".[ui]"` installs the dependencies declared in [pyproject.toml](../pyproject.toml). You do not need to install these packages individually.
+After exporting, press **Ctrl+C** in the running terminal on either system to stop the server. Closing only the browser does not stop it.
 
-| Dependency | Purpose |
-| --- | --- |
-| NumPy, SciPy | Arrays, scientific calculations, and filtering |
-| pandas | Tables and result export |
-| Matplotlib | Plotting |
-| PyYAML | Configuration input/output |
-| scikit-image (>=0.25, <0.27) | Image processing, including rolling-ball |
-| Pillow (`ui` extra) | Image input/output and PNG generation |
-| Tcl/Tk (Python installation component) | Native windows such as the Windows folder chooser |
-| FFmpeg executable (optional) | MP4 export; not required for ordinary image processing |
+## 8. Install FFmpeg only for MP4 export
 
-Normal use does not require Node.js, VS Code, Git, Jupyter, or Conda. See the root [README](../README.md) for development and notebook extras. Do not copy `.venv` from another computer or operating system; create it on the current computer.
+Image processing and PNG export do not require FFmpeg. For video export, install its executable in the same terminal workflow.
 
-## 6. Install FFmpeg when you need MP4 export
+Windows:
 
-Source installation does not install the FFmpeg executable automatically. You can process images first and install FFmpeg later. Running `pip install ffmpeg` alone does not replace this step.
+```powershell
+winget install --id Gyan.FFmpeg --exact --source winget
+```
 
-### macOS
-
-If Homebrew is installed, run:
+macOS:
 
 ```bash
 brew install ffmpeg
+```
+
+Restart VS Code, then verify:
+
+```text
 ffmpeg -version
 ```
 
-Otherwise, open the [Homebrew website](https://brew.sh/), copy its installation command into Terminal, and follow its prompts. Complete the installer's **Next steps**, including adding Homebrew to PATH. Reopen Terminal and run the two commands above. See the [Homebrew FFmpeg page](https://formulae.brew.sh/formula/ffmpeg).
+Launch the app again from the new terminal. Installing a Python package named `ffmpeg` does not replace the executable. Package references: [WinGet FFmpeg](https://github.com/microsoft/winget-pkgs/tree/master/manifests/g/Gyan/FFmpeg), [Homebrew FFmpeg](https://formulae.brew.sh/formula/ffmpeg).
 
-### Windows
+## 9. Update after the maintainer publishes changes
 
-1. Open the [official FFmpeg download page](https://www.ffmpeg.org/download.html) and follow one of its **Windows EXE Files** provider links.
-2. Download a precompiled ZIP for x64 Windows containing `ffmpeg.exe`, such as an essentials build. Do not download the source-code archive.
-3. Extract the ZIP. Locate `ffmpeg.exe` in its `bin` folder, for example `C:\Tools\ffmpeg\bin\ffmpeg.exe`.
-4. Search the Start menu for **Edit environment variables for your account**. Under user variables, select **Path → Edit → New** and enter the actual `bin` folder path, for example `C:\Tools\ffmpeg\bin`. Keep existing entries. Confirm each dialog with OK.
-5. Close and reopen PowerShell, then run:
+1. Export your current work and stop the app.
+2. Open your fork on GitHub and choose **Sync fork → Update branch** for the branch you use. The maintainer must first push updates to the upstream repository.
+3. In your local project terminal, run `git status`.
+4. If it reports a clean working tree, run the appropriate commands below. If there are local changes or conflicts, preserve and resolve them first; do not force-overwrite them.
+
+Windows:
 
 ```powershell
-ffmpeg -version
+git pull --ff-only
+.\.venv\Scripts\python.exe -m pip install -e ".[ui]"
+.\.venv\Scripts\python.exe -m pip check
+.\.venv\Scripts\python.exe ui\app_processing.py
 ```
 
-Once version information appears, restart QCL. If QCL still cannot find FFmpeg, verify the command works in a new terminal and launch QCL from that terminal.
-
-## 7. Stopping, updating, and troubleshooting
-
-Export a processing ZIP and keep the original raw data. For the source app, press **Ctrl+C** in its terminal to stop it; for the packaged app, choose **Quit**. Sessions are held in memory and are not automatically saved when you close the browser. Avoid refreshing the workspace or launching multiple instances during an analysis.
-
-| Symptom | What to check |
-| --- | --- |
-| `requires a different Python` | Check that `.venv` was created with Python 3.12. If it uses another version, stop the app, rename `.venv` as a backup, and create a new environment using these instructions |
-| `pyproject.toml` or another file is not found | Run commands from the project root; inspect `ls` or `Get-ChildItem` output |
-| `ModuleNotFoundError` | Use the explicit `.venv` Python path and rerun `-m pip install -e ".[ui]"` |
-| pip cannot download packages | Check network/proxy settings and retain the full error. Do not disable certificate verification. For certificate errors with the official macOS Python installer, try its `Install Certificates.command` under Applications/Python 3.12 |
-| Browser cannot connect | Check the terminal is still running without startup errors and that the address matches its output. Enter the full `http://127.0.0.1:8766` address |
-| `Address already in use` / `WinError 10048` | Another instance may be running. Use it, or export and stop it. Alternatively, use a different port as shown below |
-| Choose folder does not show a dialog | Check behind the browser. On Windows, check the Python Tcl/Tk component. Alternatively, use CSV input and select all required bands |
-| Slow processing or insufficient memory | Start with fewer patterns and necessary bands. Large images, rolling-ball, and multiple datasets require more memory and computation |
-| Downloaded files are missing | Check browser download history and the Downloads folder. The browser controls the destination |
-
-To launch on another port, use the command for your operating system:
+macOS:
 
 ```bash
-# macOS
-.venv/bin/python ui/app_processing.py --port 8776
+git pull --ff-only
+.venv/bin/python -m pip install -e ".[ui]"
+.venv/bin/python -m pip check
+.venv/bin/python ui/app_processing.py
 ```
 
-```powershell
-# Windows PowerShell
-.\.venv\Scripts\python.exe ui\app_processing.py --port 8776
-```
+A new clone or environment is normally unnecessary. If the Python requirement changes, follow the updated guide. Moving/renaming the project or switching computers may require recreating `.venv`. Software updates do not recalculate archived results automatically; import the project to reproduce and inspect the verification report.
 
-Then open **http://127.0.0.1:8776**. The source Processing UI does not automatically switch away from an occupied port.
+## 10. Troubleshooting
 
-Export before updating the source. Install dependencies from the new source root and launch there. Recreate `.venv` after moving or renaming the source folder. Keep older results and inspect the reproduction report; similar-looking images alone do not establish identical results.
+| Symptom | Action |
+| --- | --- |
+| Repository not found / Fork unavailable | Check the URL, signed-in account, and repository access/fork permissions |
+| `winget` or `brew` not found | Complete the package-manager setup in step 2 and restart VS Code; on Mac, run the installer's shell-environment Next steps |
+| Python 3.12 not found | Complete step 4 and restart VS Code; do not create the environment with an arbitrary Python version |
+| `pyproject.toml` not found | Open the cloned project root and check `Get-ChildItem` / `ls` |
+| `.venv` interpreter not found | Complete step 5 in this project folder |
+| `ModuleNotFoundError: No module named 'numpy'` | Use the `.venv` interpreter and rerun its `-m pip install -e ".[ui]"` command |
+| Wrong Python version in `.venv` | Stop the app, rename the old environment as a backup, and recreate it using Python 3.12 |
+| Dependency download fails | Check network/proxy access and retain the error output; do not disable certificate verification |
+| Browser cannot connect | Check the terminal for startup errors and use the address printed by the server |
+| `Address already in use` / `WinError 10048` | Use the existing instance, or stop it after exporting. To use another port, append `--port 8776` to the launch command and visit `http://127.0.0.1:8776` |
+| Folder chooser seems absent | Check behind other windows; alternatively select all required bands through CSV input |
+| Slow processing / insufficient memory | Start with fewer patterns and required bands; large images and rolling-ball increase memory and computation |
+| Download not found | Check the browser's download history and Downloads folder |
 
-When requesting help, include your operating system, Python version, source/application version or acquisition date, current Section, exact error text, the terminal's final error output, and minimal reproduction steps. Windows application logs are at `%LOCALAPPDATA%\QCL Processing\app.log`. You do not need to send your entire research dataset initially.
+When asking for help, include your operating system, `git log -1 --oneline`, Python version, current Section, exact command, and complete error output. Do not send the entire research dataset unless needed.

@@ -10,33 +10,38 @@ Read these guides in order:
 2. **[User guide](ui/QUICKSTART.md)**: raw CSV input, Sections 1–10, CNR, timelapse, folder comparison, exporting, and reproducing an analysis.
 3. **[Processing reference](ui/README_PROCESSING.md)**: detailed parameters, algorithms, output files, and verification.
 
-If you already have a built Windows application, follow [the application instructions](packaging/START_HERE.txt); no separate Python installation is needed. A source ZIP, a Windows application ZIP, and an exported processing project ZIP serve different purposes.
+## Installation and updates
 
-## Quick launch for users with Python installed
+Follow [the installation guide](ui/INSTALLATION.md) in order:
 
-The project requires **Python >=3.12 and <3.13**. Run these commands from the project root containing `pyproject.toml`. Environment activation is not required. The initial installation needs internet access.
+1. Fork the upstream repository into your GitHub account.
+2. Prepare Git in the VS Code terminal and clone your fork.
+3. Install Python 3.12 using WinGet on Windows or Homebrew on macOS.
+4. Create the project-local `.venv`, install `.[ui]`, and run `pip check`.
+5. Launch using the explicit environment path below.
 
-macOS:
+The guide includes every command, first-time package-manager setup, optional
+FFmpeg installation, troubleshooting, and **Sync fork → git pull** updates.
+Python must be **>=3.12 and <3.13**. Do not copy `.venv` between computers.
 
-```bash
-python3.12 -m venv .venv
-.venv/bin/python -m pip install --upgrade pip
-.venv/bin/python -m pip install -e ".[ui]"
-.venv/bin/python ui/app_processing.py
-```
+After installation, launch from the project root:
 
 Windows PowerShell:
 
 ```powershell
-py -3.12 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install --upgrade pip
-.\.venv\Scripts\python.exe -m pip install -e ".[ui]"
 .\.venv\Scripts\python.exe ui\app_processing.py
 ```
 
-Alternatively, install with `ui/setup_macos.command` or `ui/setup_windows.bat`, then start with `ui/launch_processing_macos.command` or `ui/launch_processing_windows.bat`. See the installation guide for path and executable-permission troubleshooting.
+macOS:
 
-The default browser address is **http://127.0.0.1:8766**. Keep the terminal open while working. Export before pressing Ctrl+C to stop the server. Sessions are not saved automatically. Subsequent launches require only the launch command, not reinstallation.
+```bash
+.venv/bin/python ui/app_processing.py
+```
+
+Open **http://127.0.0.1:8766** if the browser does not open automatically.
+Keep the terminal running. Export before pressing Ctrl+C to stop the app;
+sessions are not saved automatically. Subsequent sessions require only the
+launch command. A processing project ZIP is an analysis archive, not an installer.
 
 ## Current processing workflow
 
@@ -53,11 +58,10 @@ In the multi-folder workspace, double-click a tab to rename it and use its × bu
 
 **Exports default to lightweight projects without full raw image arrays.** Reproduction requires matching external raw data unless you include raw inputs in the export. Stage CSVs and auxiliary arrays are optional; required reproduction settings always remain included. Saved settings can also be applied to new raw data, with new spatial selections. Project import limits are 1 GiB compressed and 4 GiB expanded. Download PNGs and MP4s separately as needed.
 
-## Other interfaces and Windows packaging
+## Other interfaces
 
 - [Original Image Workbench (legacy)](ui/README.md): `ui/app.py`, default port 8765, with the older independent on-MS/out-MS workflow.
 - [Fourier Image Lab](ui/README_FOURIER_LAB.md): `ui/app_fourier_lab.py`, default port 8767, for experiments and filter inspection.
-- [Windows application build guide](packaging/README.md): building, validating, and distributing the EXE on Windows. Source updates do not update an existing EXE.
 
 ## Development and notebooks
 
@@ -67,7 +71,7 @@ In the multi-folder workspace, double-click a tab to rename it and use its × bu
 | `ui/` | Local interfaces, import/export, launchers, and user documentation |
 | `notebooks/` | Exploration and validation |
 | `tests/` | Numerical, API, and browser-state helper tests |
-| `packaging/` | Windows builds and runtime checks |
+| `packaging/` | Internal build tooling; not part of user installation |
 
 For development, install `python -m pip install -e ".[dev,ui]"` in a Python 3.12 environment and run `python -m pytest`. When using the environment above, replace `python` with `.venv/bin/python` on macOS or `.\.venv\Scripts\python.exe` on Windows.
 

@@ -6,13 +6,12 @@ Then follow the [step-by-step user guide](QUICKSTART.md) for the current ten-sec
 interface. Both guides use English explanations and the exact UI labels.
 This page is the detailed technical reference.
 
-Install with `python -m pip install -e ".[ui]"` in a Python 3.12 environment,
-then run `python ui/app_processing.py` from the repository root. The source app
-opens at http://127.0.0.1:8766; use `--port 8776` if that port is occupied.
-The installation guide gives explicit virtual-environment paths for each OS,
-so activation is not required. Keep the server running and export before exit.
-For a Windows application with bundled dependencies, see
-[Windows packaging](../packaging/README.md). The separate `ui/app.py` is the legacy UI.
+Use the single Fork/Clone installation workflow linked above. After setup,
+launch from the project root with `.venv/bin/python ui/app_processing.py` on
+macOS or `.\.venv\Scripts\python.exe ui\app_processing.py` on Windows.
+The app opens at http://127.0.0.1:8766; append `--port 8776` if needed.
+Keep the server running and export before exit. The separate `ui/app.py`
+is the legacy interface.
 
 ## How the workflow works
 

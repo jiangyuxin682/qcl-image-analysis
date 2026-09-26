@@ -6,25 +6,26 @@ workbench's data or session.
 
 ## Start
 
-First install Python 3.12 and the project using the
-[macOS / Windows installation guide](INSTALLATION.md). No additional Python
-dependencies are needed for this interface. From the repository root, use the
-existing environment (replace `python` below with `.venv/bin/python` on macOS
-or `.\.venv\Scripts\python.exe` on Windows if the environment is not active):
+Complete the same [Fork/Clone installation guide](INSTALLATION.md) used by the
+Processing Workbench. This interface reuses that `.venv` without extra dependencies.
+From the project root:
 
-```bash
-python ui/app_fourier_lab.py
+Windows PowerShell:
+
+```powershell
+.\.venv\Scripts\python.exe ui\app_fourier_lab.py
 ```
 
-Or double-click `launch_fourier_lab_macos.command` / `launch_fourier_lab_windows.bat`
-in the `ui` folder. The browser opens **http://127.0.0.1:8767**. To use another
-port or skip browser launch: `python ui/app_fourier_lab.py --port 8768 --no-browser`.
-If the requested port is already in use, the launcher automatically chooses a
-free port and prints/opens the actual address. A previously started instance can
-also be used directly at its existing address.
-For a first source installation, use the project's existing setup script.
-This separate launcher is not included in the existing Processing executable;
-use the source launcher for this laboratory.
+macOS:
+
+```bash
+.venv/bin/python ui/app_fourier_lab.py
+```
+
+The browser opens at **http://127.0.0.1:8767**. Append `--port 8768` to choose
+another port or `--no-browser` to skip browser launch. If the requested port
+is occupied, this experimental interface selects an available port and prints
+its address. Keep using the address of your existing session when appropriate.
 
 ## Experiments
 
