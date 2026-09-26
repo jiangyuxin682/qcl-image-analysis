@@ -6,7 +6,11 @@ workbench's data or session.
 
 ## Start
 
-Use the existing project environment (no additional dependencies):
+First install Python 3.12 and the project using the
+[macOS / Windows installation guide](INSTALLATION.md). No additional Python
+dependencies are needed for this interface. From the repository root, use the
+existing environment (replace `python` below with `.venv/bin/python` on macOS
+or `.\.venv\Scripts\python.exe` on Windows if the environment is not active):
 
 ```bash
 python ui/app_fourier_lab.py

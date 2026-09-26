@@ -6,7 +6,7 @@ const source=fs.readFileSync(require('node:path').join(__dirname,'../ui/static_p
 function setup(){
   const nodes=new Map(),plots=[],tables=[];
   const $=id=>{if(!nodes.has(id))nodes.set(id,{value:id==='#preview-band'?'1658':'median_crop',hidden:false,textContent:'',replaceChildren(){}});return nodes.get(id)};
-  const c={$,state:{step:6,maxStep:7,viewEpoch:1,hasGold:true,normalizationDirty:false},URLSearchParams,window:{addEventListener(){}},setTimeout,clearTimeout,table:(node,rows)=>tables.push(rows)};
+  const c={$,scientificLabel:(node,text)=>{node.textContent=text;return node;},state:{step:6,maxStep:7,viewEpoch:1,hasGold:true,normalizationDirty:false},URLSearchParams,window:{addEventListener(){}},setTimeout,clearTimeout,table:(node,rows)=>tables.push(rows)};
   vm.createContext(c);
   vm.runInContext(source.slice(source.indexOf('let signalTrendData='),source.indexOf('function activeStages(')),c);
   c.trendPlot=(...args)=>plots.push(args);

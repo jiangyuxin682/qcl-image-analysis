@@ -30,3 +30,27 @@ test('stale extrema cannot replace a newer comparison',async()=>{
   const {c}=setup();c.api=async()=>{c.revision=2;return {available:true,data_min:-5,data_max:8};};
   assert.equal(await c.sharedColorRange('baseline',1658,1),null);assert.equal(c.$('#compare-color-min').value,'');
 });
+
+test('per-folder color limits query each selected wavenumber at the shared stage',async()=>{
+  const {c,requests}=setup();
+  const bands=new Map([['a',1658],['b',1702]]);
+  await c.sharedColorRange('absorbance',null,1,bands);
+  assert.deepEqual(requests.map(q=>q.get('wavenumber')),['1658','1702']);
+  assert.ok(requests.every(q=>q.get('kind')==='absorbance'));
+});
+
+test('per-folder selections survive stage changes; unavailable bands require explicit reselection',()=>{
+  const {c}=setup();
+  c.info=[{id:'a',patterns:['pattern0'],bands:[1601,1658,1702],mapping:{1658:[1601,1702]},baseline_enabled:{1658:true}},
+    {id:'b',patterns:['pattern2'],bands:[1775],mapping:{1775:[]},baseline_enabled:{1775:false}}];
+  vm.runInContext(source.slice(source.indexOf('function availableBands('),source.indexOf('function stable(')),c);
+  let selected=c.comparisonBands('absorbance',true,1658);
+  assert.equal(selected.get('a'),1658);assert.equal(selected.get('b'),1775);
+  selected=c.comparisonBands('baseline',true,1658);
+  assert.equal(selected.get('a'),1658);assert.equal(selected.get('b'),null);
+  selected=c.comparisonBands('absorbance',true,1658);
+  assert.equal(selected.get('b'),1775);
+  c.selections.get('a').wavenumber=1601;
+  assert.equal(c.comparisonBands('baseline',true,1658).get('a'),null);
+  assert.equal(c.comparisonBands('raw',true,1658).get('a'),1601);
+});

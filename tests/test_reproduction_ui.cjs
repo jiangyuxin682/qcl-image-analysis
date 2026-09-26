@@ -38,3 +38,12 @@ test('export is blocked after upstream settings invalidate later stages',()=>{
   vm.runInContext(source.split('\n').find(s=>s.startsWith("$('#download').onclick=")),c);
   let prevented=false;c.$('#download').onclick({preventDefault:()=>prevented=true});assert.equal(prevented,true);
 });
+
+test('applying settings to new data opens normalization without marking the results reproduced',()=>{
+  const c=setup(),d=restored();d.applied_settings=true;d.cnr=[];d.cnr_rois=null;d.report=null;d.on_roi=null;d.r0_roi=null;d.r0_selection={method:'brightest',count:5};
+  c.restoreReproducedState(d);
+  assert.equal(c.state.step,3);assert.equal(c.state.maxStep,3);
+  assert.equal(c.state.normalizationDirty,true);assert.equal(c.state.hasGold,null);
+  assert.equal(c.state.rois.on,null);assert.equal(c.state.rois.target,null);
+  assert.equal(c.$('#session-status').textContent,'Saved settings loaded');
+});

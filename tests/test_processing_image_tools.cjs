@@ -41,7 +41,10 @@ for(const hasProfile of [false,true])test(`PNG includes parameters and ${hasProf
   await tools.download({tag:'image'},{width:100,height:80,vmin:0,vmax:1},'pattern0 · 1658 cm⁻¹ · Absorbance after baseline','result',card);
   const output=elements.find(e=>e.tag==='canvas');
   const rendered=texts.map(row=>row[0]).join('\n');
-  parameters.forEach(text=>assert.ok(rendered.includes(text)));
+  const joined=texts.map(row=>row[0]).join('');
+  parameters.forEach(text=>assert.ok(joined.includes(text.replaceAll('sigma_bg','σbg').replaceAll('A_bg','Abg'))));
+  const bg=texts.find(row=>row[0]==='bg'),base=texts.find(row=>row[0]==='A');
+  assert.ok(bg[2]>base[2], 'background label is drawn below the baseline');
   assert.ok(rendered.includes('Lower limit set to 0: yes'));
   assert.ok(rendered.includes('pattern0'));
   assert.ok(rendered.includes('X (pixel)'));assert.ok(rendered.includes('Y (pixel)'));

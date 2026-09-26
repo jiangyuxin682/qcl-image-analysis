@@ -39,7 +39,7 @@ def run_checks(check_window=True):
         thread.join(timeout=5)
 
     with tempfile.TemporaryDirectory(prefix="qcl-desktop-check-") as directory:
-        folder = Path(directory) / "测试 data" / "pattern0"
+        folder = Path(directory) / "\u6d4b\u8bd5 data" / "pattern0"
         folder.mkdir(parents=True)
         yy, xx = np.mgrid[:16, :20]
         for band in (1675, 1725, 1775):

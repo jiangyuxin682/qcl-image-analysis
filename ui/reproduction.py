@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 
 FORMAT = 'qcl-processing-project'
-VERSION = 1
+VERSION = 2
 RESULT_FILENAMES = {
     'raw': 'Intensity_raw', 'reflectance': 'Reflectance_gold_normalized',
     'fourier': 'Signal_Fourier_filtered', 'rolling': 'Signal_flat_field_corrected',
@@ -32,6 +32,45 @@ def result_filename(stage):
 MAX_UPLOAD = 1024**3
 MAX_EXPANDED = 4 * 1024**3
 RTOL, ATOL = 1e-10, 1e-12
+
+
+STAGES = ('raw', 'reflectance', 'fourier', 'rolling', 'absorbance', 'baseline')
+AUXILIARY = ('linear_baseline', 'fourier_mask', 'background', 'gain', 'flat_valid_mask', 'cell_free_pixel_mask', 'baseline_valid_mask')
+
+
+def export_options(value=None):
+    # Keep the programmatic legacy default; browser exports explicitly select a preset.
+    if value is None:
+        return {'raw_inputs': True, 'stages': list(STAGES), 'auxiliary': True, 'tables': True}
+    if not isinstance(value, dict):
+        raise ValueError('Invalid export options.')
+    result = {'raw_inputs': False, 'stages': [], 'auxiliary': False, 'tables': True, **value}
+    if set(result) != {'raw_inputs', 'stages', 'auxiliary', 'tables'} or any(not isinstance(result[k], bool) for k in ('raw_inputs', 'auxiliary', 'tables')):
+        raise ValueError('Invalid export options.')
+    if not isinstance(result['stages'], list) or any(stage not in STAGES for stage in result['stages']):
+        raise ValueError('Unknown export stage.')
+    return result
+
+
+def array_fingerprint(array):
+    array = np.array(array, dtype='<f8', order='C', copy=True)
+    array[np.isnan(array)] = np.nan
+    array[array == 0] = 0
+    return {'shape': list(array.shape), 'sha256': hashlib.sha256(array.tobytes()).hexdigest()}
+
+
+def result_arrays(state, key):
+    arrays = state.stage_arrays(key)
+    arrays.update(fourier_mask=state.ff[key].mask, background=state.flat[key].background,
+                  gain=state.flat[key].gain, flat_valid_mask=state.flat[key].valid_mask.astype(int))
+    mask = np.zeros(state.crops[key].shape, dtype=int)
+    pixels = state.r0_pixels[key]
+    mask[pixels[:, 0], pixels[:, 1]] = 1
+    arrays['cell_free_pixel_mask'] = mask
+    if key in state.baselines:
+        arrays.update(linear_baseline=state.baselines[key].baseline,
+                      baseline_valid_mask=state.baselines[key].valid_mask.astype(int))
+    return arrays
 
 
 def resolved_parameters(parameters):
@@ -87,33 +126,39 @@ def environment():
             'packages': versions, 'git': git, 'source_sha256': fingerprints}
 
 
-def write_project(archive, state, metadata, clean_json):
+def write_project(archive, state, metadata, clean_json, options=None):
     """Add full inputs and a verification manifest to the human-readable results."""
+    options = export_options(options)
     inputs = []
     for index, (key, array) in enumerate(state.raw.items()):
         name = f'inputs/image_{index:06d}.npy'
-        output = io.BytesIO()
-        np.save(output, array, allow_pickle=False)
-        archive.writestr(name, output.getvalue())
+        if options['raw_inputs']:
+            output = io.BytesIO()
+            np.save(output, array, allow_pickle=False)
+            archive.writestr(name, output.getvalue())
         row = state.dataset[(state.dataset.pattern == key[0]) & (state.dataset.wavenumber == key[1])].iloc[0]
-        inputs.append({'pattern': key[0], 'wavenumber': key[1], 'file': name,
+        inputs.append({'pattern': key[0], 'wavenumber': key[1], 'file': name if options['raw_inputs'] else None, 'fingerprint': array_fingerprint(array),
                        'shape': list(array.shape), 'dtype': str(array.dtype),
                        'source_path': str(row.path), 'frame': int(row.frame),
                        'created_timestamp': float(row.created_timestamp),
                        'timestamp_source': row.timestamp_source})
     recipe = {'format': FORMAT, 'version': VERSION,
               'selection_policy': 'reuse_committed_pixel_coordinates_and_crop_positions',
-              'inputs': inputs, 'configuration': metadata,
+              'inputs': inputs, 'configuration': metadata, 'export_options': options,
               'processing': resolved_parameters(state.parameters),
               'scope': 'Sections 2–8 numerical processing; view, spectrum and video state excluded'}
     archive.writestr('recipe.json', json.dumps(clean_json(recipe), indent=2, allow_nan=False))
+    verification = {'arrays': {f'{key[0]}/{key[1]}cm-1/{result_filename(stage)}': array_fingerprint(array)
+                               for key in state.crops for stage, array in result_arrays(state, key).items() if array is not None},
+                    'qc': json.loads(state.qc.drop(columns='path').to_json(orient='records', double_precision=15))}
+    archive.writestr('verification.json', json.dumps(verification))
     archive.writestr('environment.json', json.dumps(environment(), indent=2))
     if getattr(state, 'reproduction_report', None):
         archive.writestr('reproduction_report.json', json.dumps(clean_json(state.reproduction_report), indent=2, allow_nan=False))
-    archive.writestr('REPRODUCE.txt', 'Open QCL Processing Workbench, choose Import processing ZIP in Section 1, then Reproduce.\n'
-                     'Full loaded raw image arrays are included losslessly in inputs/*.npy. Original CSV formatting is not retained.\n'
-                     'Results use the original CSV layout. No original source path is needed.\n'
-                     'Version 1 restores numerical Sections 2–8 only, not videos, line plots or multi-folder workspace settings.\n')
+    archive.writestr('REPRODUCE.txt', 'Open QCL Processing Workbench, choose Import processing ZIP in Section 1, then Reproduce.\n' +
+                     ('Raw arrays are included losslessly.\n' if options['raw_inputs'] else 'Raw arrays are NOT included. Select matching original raw data to reproduce.\n') +
+                     'Selected result CSVs are optional; fingerprints cover omitted arrays.\n'
+                     'This project restores numerical Sections 2–8 only, not videos, line plots or multi-folder workspace settings.\n')
     inventory = {name: {'size': archive.getinfo(name).file_size,
                         'sha256': hashlib.sha256(archive.read(name)).hexdigest()}
                  for name in archive.namelist()}
@@ -152,7 +197,7 @@ def validated_archive(data):
         if archive.getinfo('manifest.json').file_size > 32 * 1024**2:
             raise ValueError('Project manifest is too large.')
         manifest = json.loads(archive.read('manifest.json'))
-        if manifest.get('format') != FORMAT or manifest.get('version') != VERSION:
+        if manifest.get('format') != FORMAT or manifest.get('version') not in (1, VERSION):
             raise ValueError('Unsupported reproduction package format or version.')
         inventory = manifest['files']
         if set(inventory) != set(names) - {'manifest.json'}:
@@ -236,9 +281,10 @@ def compare_records(name, actual, expected):
     return checks
 
 
-def reproduce(data, progress=lambda **values: None):
+def reproduce(data, progress=lambda **values: None, *, external=None, mode="reproduce"):
     """Build an isolated new session; callers commit only after successful completion."""
     from qcl_analysis.cropping import crop_image
+    from qcl_analysis.io import load_qcl_csv
     from ui.app_processing import ProcessingState, clean_json, roi_from
 
     progress(status='Validating project', completed=0, total=7)
@@ -246,7 +292,7 @@ def reproduce(data, progress=lambda **values: None):
     work = tempfile.TemporaryDirectory(prefix='qcl-reproduce-')
     try:
         recipe = json.loads(archive.read('recipe.json'))
-        if recipe.get('format') != FORMAT or recipe.get('version') != VERSION:
+        if recipe.get('format') != FORMAT or recipe.get('version') not in (1, VERSION):
             raise ValueError('Unsupported processing recipe version.')
         if recipe.get('selection_policy') != 'reuse_committed_pixel_coordinates_and_crop_positions':
             raise ValueError('Unsupported spatial-selection policy.')
@@ -255,7 +301,27 @@ def reproduce(data, progress=lambda **values: None):
         saved_environment = json.loads(archive.read('environment.json'))
         differences = [key for key in ('python', 'packages', 'source_sha256')
                        if saved_environment.get(key) != current_environment.get(key)]
+        if mode not in ('reproduce', 'apply'):
+            raise ValueError('Unknown project import mode.')
+        if mode == 'apply' and external is None:
+            raise ValueError('Select new raw data to apply saved settings.')
         state = ProcessingState()
+        if mode == 'apply':
+            # Copy external inputs so the caller can release its staging session.
+            rows = []
+            for index, item in enumerate(external.dataset.itertuples(index=False)):
+                array = load_qcl_csv(item.path)
+                path = Path(work.name) / f'image_{index:06d}.csv'
+                np.savetxt(path, array, delimiter=',')
+                row = item._asdict(); row['path'] = path; rows.append(row)
+            state.dataset = pd.DataFrame(rows); state.path = Path(work.name); state.stage = 'discovered'
+            state.configure({'mapping': meta['centers_and_references'], 'baseline_enabled': meta.get('baseline_enabled', {}),
+                             'patterns': list(state.dataset.pattern.unique())})
+            state._applied_configuration = {'configuration': meta, 'processing': recipe['processing']}
+            state._reproduction_inputs = work
+            progress(status='Settings loaded; review normalization and spatial selections', completed=7, total=7)
+            return state, None
+        external_rows = {(r.pattern, int(r.wavenumber)): r for r in external.dataset.itertuples(index=False)} if external is not None else None
         rows = []
         keys = set()
         for index, item in enumerate(recipe['inputs']):
@@ -266,7 +332,21 @@ def reproduce(data, progress=lambda **values: None):
             # Pattern names are later used in ZIP member names, never as input paths.
             if not isinstance(key[0], str) or not key[0] or key[0] in {'.', '..'} or any(c in key[0] for c in '/\\:'):
                 raise ValueError('Invalid pattern name in recipe.')
-            array = read_raw_array(archive.read(item['file']), item['shape'])
+            if external_rows is not None:
+                if key not in external_rows:
+                    raise ValueError(f'External raw data is missing {key}.')
+                array = load_qcl_csv(external_rows[key].path)
+                expected = item.get('fingerprint')
+                if expected is None:
+                    expected = array_fingerprint(read_raw_array(archive.read(item['file']), item['shape']))
+                if list(array.shape) != item['shape'] or array_fingerprint(array) != expected:
+                    raise ValueError(f'External raw data differs at {key}. Use Apply saved settings for new data.')
+            else:
+                if not item.get('file'):
+                    raise ValueError('This project excludes raw images. Select the original raw folder or CSV files.')
+                array = read_raw_array(archive.read(item['file']), item['shape'])
+                if item.get('fingerprint') and array_fingerprint(array) != item['fingerprint']:
+                    raise ValueError(f'Raw input fingerprint mismatch: {key}')
             path = Path(work.name) / f'image_{index:06d}.csv'
             np.savetxt(path, array, delimiter=',')
             rows.append({'pattern': key[0], 'wavenumber': key[1], 'path': path,
@@ -275,7 +355,7 @@ def reproduce(data, progress=lambda **values: None):
         state.dataset = pd.DataFrame(rows)
         state.path = Path(work.name)
         state.stage = 'discovered'
-        state.configure({'mapping': meta['centers_and_references'], 'patterns': meta['patterns']})
+        state.configure({'mapping': meta['centers_and_references'], 'baseline_enabled': meta.get('baseline_enabled', {}), 'patterns': meta['patterns']})
         if set(state.raw) != keys:
             raise ValueError('Recipe inputs do not match the configured patterns and bands.')
         progress(status='Recalculating normalization', completed=1, total=7)
@@ -314,22 +394,20 @@ def reproduce(data, progress=lambda **values: None):
                        'high': cnr[0]['contrast_high_percentile']}, scale_policy=scale_policy)
         progress(status='Verifying results', completed=6, total=7)
         checks = []
+        verification = json.loads(archive.read('verification.json')) if recipe['version'] >= 2 else None
         for key in state.crops:
             folder = f'{key[0]}/{key[1]}cm-1'
-            arrays = state.stage_arrays(key)
-            arrays.update(fourier_mask=state.ff[key].mask, background=state.flat[key].background,
-                          gain=state.flat[key].gain, flat_valid_mask=state.flat[key].valid_mask.astype(int))
-            cell_mask = np.zeros(state.crops[key].shape, dtype=int)
-            points = state.r0_pixels[key]
-            cell_mask[points[:, 0], points[:, 1]] = 1
-            arrays['cell_free_pixel_mask'] = cell_mask
-            if key in state.baselines:
-                arrays.update(linear_baseline=state.baselines[key].baseline,
-                              baseline_valid_mask=state.baselines[key].valid_mask.astype(int))
+            arrays = result_arrays(state, key)
             for stage, array in arrays.items():
                 if array is None:
                     continue
                 name = f'{folder}/{result_filename(stage)}'
+                if name not in archive.namelist() and verification is not None:
+                    expected = verification['arrays'][name]
+                    matches = array_fingerprint(array) == expected
+                    checks.append({'item': name, 'status': 'exact' if matches else 'unverified',
+                                   'reason': 'Exact array fingerprint; CSV omitted' if matches else 'Fingerprint differs; omitted array prevents numerical tolerance comparison'})
+                    continue
                 if name not in archive.namelist():
                     name = f'{folder}/{stage}.csv'  # Earlier project exports.
                 expected = np.loadtxt(io.BytesIO(archive.read(name)), delimiter=',', ndmin=2)
@@ -339,18 +417,23 @@ def reproduce(data, progress=lambda **values: None):
         checks += compare_records('flat_reference_levels',
                                   [{'pattern': k[0], 'wavenumber': k[1], 'level': f.reference_level}
                                    for k, f in state.flat.items()], meta['flat_reference_levels'])
-        expected_qc = pd.read_csv(io.BytesIO(archive.read('quality_control.csv')))
-        qc_columns = [c for c in expected_qc if c not in {'path'}]
-        # Normalize pandas missing values to strict JSON nulls on both sides.
-        checks += compare_records('QC', json.loads(state.qc[qc_columns].to_json(orient='records', double_precision=15)),
-                                  json.loads(expected_qc[qc_columns].to_json(orient='records', double_precision=15)))
+        if verification is not None:
+            expected_qc = verification['qc']
+            actual_qc = json.loads(state.qc.drop(columns='path').to_json(orient='records', double_precision=15))
+            checks += compare_records('QC', actual_qc, expected_qc)
+        else:
+            expected_qc = pd.read_csv(io.BytesIO(archive.read('quality_control.csv')))
+            qc_columns = [c for c in expected_qc if c not in {'path'}]
+            checks += compare_records('QC', json.loads(state.qc[qc_columns].to_json(orient='records', double_precision=15)),
+                                      json.loads(expected_qc[qc_columns].to_json(orient='records', double_precision=15)))
         summary = {status: sum(c['status'] == status for c in checks)
-                   for status in ('exact', 'within_tolerance', 'mismatch')}
-        report = {'status': 'mismatch' if summary['mismatch'] else 'within_tolerance' if summary['within_tolerance'] else 'exact',
+                   for status in ('exact', 'within_tolerance', 'mismatch', 'unverified')}
+        report = {'status': 'mismatch' if summary['mismatch'] else 'unverified' if summary['unverified'] else 'within_tolerance' if summary['within_tolerance'] else 'exact',
                   'summary': summary, 'rtol': RTOL, 'atol': ATOL, 'checks': checks,
                   'environment_differences': differences, 'saved_environment': saved_environment,
                   'current_environment': current_environment,
-                  'selection_policy': recipe['selection_policy']}
+                  'selection_policy': recipe['selection_policy'],
+                  'verification_method': 'Array fingerprints for omitted CSVs; numerical comparison for included CSVs' if verification else 'Numerical comparison of saved CSVs'}
         if cnr and scale_policy == 'legacy_grouped':
             # Verify the archive under its historical rule, then use independent
             # image ranges for the current UI and subsequent project exports.

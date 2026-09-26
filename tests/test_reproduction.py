@@ -218,3 +218,129 @@ def test_old_grouped_cnr_is_verified_then_migrated_to_individual_scales(acquisit
     assert 'cnr_scale_migration' not in next_report
     replay._reproduction_inputs.cleanup()
     again._reproduction_inputs.cleanup()
+
+
+@pytest.mark.parametrize('mixed', [False, True])
+def test_optional_baseline_round_trip(acquisition, mixed):
+    state = ProcessingState()
+    state.discover({'path': str(acquisition)})
+    mapping = {'1080': []}
+    enabled = {'1080': False}
+    if mixed:
+        mapping['1658'] = [1601, 1702]
+        enabled['1658'] = True
+    state.configure({'mapping': mapping, 'baseline_enabled': enabled, 'patterns': ['pattern0', 'pattern1']})
+    state.normalize({'has_gold': False})
+    state.crop({'roi': {'x_min': 2, 'x_max': 18, 'y_min': 1, 'y_max': 15}})
+    state.process({'fourier': {'enabled': False}, 'rolling': {'enabled': False}})
+    result = state.calculate({'roi': {'x_min': 0, 'x_max': 3, 'y_min': 0, 'y_max': 3}})
+    assert result['stage'] == ('absorbed' if mixed else 'complete')
+    if mixed:
+        state.correct_baseline({})
+        assert set(state.baselines) == {('pattern0', 1658), ('pattern1', 1658)}
+    else:
+        assert state.bands == [1080]
+        assert not state.baselines
+    assert state.stage_arrays(('pattern0', 1080))['baseline'] is None
+    state.cnr({'background_source': 'analyte_free',
+               'target': {'x_min': 8, 'x_max': 11, 'y_min': 8, 'y_max': 11}})
+    skipped = [r for r in state.cnr_records if r['stage'] == 'baseline' and r['wavenumber'] == 1080]
+    assert all(r['status'] == 'unavailable' and not np.isfinite(r['cnr']) for r in skipped)
+    movie = state.timelapse({'kind': 'absorbance', 'wavenumber': 1080})
+    assert len(movie['frames']) == 2
+    assert movie['baseline_applied'] is False
+    package = state.export()
+    with validated_archive(package) as archive:
+        config = json.loads(archive.read('recipe.json'))['configuration']
+        assert config['baseline_enabled'] == enabled
+        assert not any('1080' in name and 'baseline' in name.lower() for name in archive.namelist())
+    replay, report = reproduce(package)
+    assert report['status'] in {'exact', 'within_tolerance'}
+    assert replay.baseline_enabled == state.baseline_enabled
+    assert replay.mapping == state.mapping
+    assert set(replay.baselines) == set(state.baselines)
+    np.testing.assert_array_equal(replay.absorbance[('pattern0', 1080)], state.absorbance[('pattern0', 1080)])
+
+
+def test_legacy_project_defaults_to_baseline_enabled(acquisition):
+    state = complete(acquisition)
+    package = state.export()
+    with validated_archive(package) as archive:
+        recipe = json.loads(archive.read('recipe.json'))
+    del recipe['configuration']['baseline_enabled']
+    package = rewrite(package, {'recipe.json': json.dumps(recipe).encode()}, rehash=True)
+    replay, report = reproduce(package)
+    assert replay.baseline_enabled == {1658: True}
+    assert set(replay.baselines) == set(state.baselines)
+    assert report['status'] in {'exact', 'within_tolerance'}
+
+
+def test_lightweight_export_requires_matching_external_raw_and_reproduces(acquisition):
+    original = complete(acquisition)
+    options = {'raw_inputs': False, 'stages': [], 'auxiliary': False, 'tables': False}
+    package = original.export(options)
+    with validated_archive(package) as archive:
+        names = archive.namelist()
+        assert 'verification.json' in names and 'recipe.json' in names
+        assert not any(name.endswith('.npy') or name.endswith('Abs_uncorrected.csv') for name in names)
+        assert 'quality_control.csv' not in names
+    with pytest.raises(ValueError, match='excludes raw'):
+        reproduce(package)
+    external = ProcessingState()
+    external.discover({'path': str(acquisition)})
+    replay, report = reproduce(package, external=external)
+    assert report['status'] == 'exact'
+    assert any('fingerprint' in c.get('reason', '') for c in report['checks'])
+    np.testing.assert_array_equal(replay.baselines[('pattern0', 1658)].corrected, original.baselines[('pattern0', 1658)].corrected)
+    # New raw values must not be presented as reproduction of the old input.
+    path = external.dataset[external.dataset.wavenumber == 1601].iloc[0].path
+    data = np.loadtxt(path, delimiter=',');np.savetxt(path, data + 1, delimiter=',')
+    with pytest.raises(ValueError, match='differs'):
+        reproduce(package, external=external)
+
+
+def test_apply_saved_settings_does_not_copy_old_spatial_selections(acquisition):
+    original = complete(acquisition)
+    external = ProcessingState();external.discover({'path': str(acquisition)})
+    external.dataset['pattern'] = external.dataset.pattern.str.replace('pattern', 'newpattern')
+    applied, report = reproduce(original.export({'raw_inputs': False}), external=external, mode='apply')
+    assert report is None and applied.reproduction_report is None
+    assert applied.stage == 'configured'
+    assert applied.patterns == ['newpattern0', 'newpattern1']
+    assert applied.mapping == original.mapping
+    assert not applied.absorbance and not applied.gold_pixels and not applied.r0_pixels
+    assert applied.on_roi is None and applied.cnr_rois is None
+    bootstrap = applied.applied_state()
+    assert bootstrap['applied_settings'] and bootstrap['parameters']['fourier']['mode'] == original.parameters['fourier']['mode']
+    assert 'reference_bands' not in bootstrap['r0_selection']
+    assert all(row.path.exists() for row in applied.dataset.itertuples())
+
+
+def test_selective_export_and_fingerprint_verification_level(acquisition):
+    original = complete(acquisition)
+    package = original.export({'raw_inputs': True, 'stages': ['baseline'], 'auxiliary': False, 'tables': True})
+    with validated_archive(package) as archive:
+        names = archive.namelist()
+        assert any(name.endswith('Abs_baseline_corrected.csv') for name in names)
+        assert not any(name.endswith('Abs_uncorrected.csv') for name in names)
+        verification = json.loads(archive.read('verification.json'))
+    item = next(k for k in verification['arrays'] if k.endswith('Abs_uncorrected.csv'))
+    verification['arrays'][item]['sha256'] = '0'*64
+    altered = rewrite(package, {'verification.json': json.dumps(verification).encode()}, rehash=True)
+    _, report = reproduce(altered)
+    assert report['status'] == 'unverified' and report['summary']['unverified'] == 1
+
+
+def test_version_one_project_remains_importable(acquisition):
+    package = complete(acquisition).export()
+    with zipfile.ZipFile(io.BytesIO(package)) as archive:
+        files = {name: archive.read(name) for name in archive.namelist() if name not in {'manifest.json', 'verification.json'}}
+    recipe = json.loads(files['recipe.json']);recipe['version'] = 1;recipe.pop('export_options')
+    for item in recipe['inputs']:item.pop('fingerprint')
+    files['recipe.json'] = json.dumps(recipe).encode()
+    files['manifest.json'] = json.dumps({'format': recipe['format'], 'version': 1, 'files': {name: {'size': len(data), 'sha256': hashlib.sha256(data).hexdigest()} for name, data in files.items()}}).encode()
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, 'w', zipfile.ZIP_DEFLATED) as archive:
+        for name, data in files.items():archive.writestr(name, data)
+    _, report = reproduce(output.getvalue())
+    assert report['status'] in {'exact', 'within_tolerance'}

@@ -215,9 +215,9 @@ def test_system_folder_chooser_cancel_unicode_and_failure(monkeypatch, platform)
     def run(command, **kwargs):
         calls.append(command)
         assert kwargs['timeout'] == 300
-        return SimpleNamespace(stdout='C:/研究 data\n'.encode())
+        return SimpleNamespace(stdout='C:/\u7814\u7a76 data\n'.encode())
     monkeypatch.setattr(subprocess, 'run', run)
-    assert choose_local_folder() == 'C:/研究 data'
+    assert choose_local_folder() == 'C:/\u7814\u7a76 data'
     assert isinstance(calls[0], list)
     monkeypatch.setattr(subprocess, 'run', lambda *args, **kwargs: SimpleNamespace(stdout=b''))
     assert choose_local_folder() == ''
@@ -251,3 +251,42 @@ def test_streaming_http_routes(acquisition, monkeypatch):
     restored = post('/api/reproduce', original.export())
     assert restored['report']['summary']['mismatch'] == 0
     session.get('default')._reproduction_inputs.cleanup()
+
+
+@pytest.mark.parametrize('mode', ['reproduce', 'apply'])
+def test_external_raw_project_import_endpoint_and_bootstrap(acquisition, monkeypatch, mode):
+    session = ComparisonSession()
+    monkeypatch.setattr('ui.app_processing.COMPARISON', session)
+    raw = session.add({'path': str(acquisition)})['id']
+    package = complete(acquisition).export({'raw_inputs': False, 'stages': ['baseline']})
+    handler = Handler.__new__(Handler)
+    results = []
+    handler.json = lambda result, status=200: results.append((status, result))
+    handler.path = f'/api/datasets/reproduce?raw_dataset={raw}&mode={mode}&name=Restored'
+    handler.headers = {'Content-Length': str(len(package))}
+    handler.rfile = io.BytesIO(package)
+    handler.do_POST()
+    assert results[-1][0] == 200, results[-1]
+    target = results[-1][1]['datasets'][0]['id']
+    session.remove({'id': raw})
+    handler.path = f'/api/bootstrap?dataset={target}'
+    handler.do_GET()
+    assert results[-1][0] == 200
+    result = results[-1][1]
+    assert result['kind'] == 'reproduced'
+    assert result['state']['stage'] == ('configured' if mode == 'apply' else 'complete')
+    assert bool(result['state'].get('applied_settings')) == (mode == 'apply')
+    assert all(path.exists() for path in session.get(target).dataset.path)
+
+
+def test_lightweight_comparison_bundle_reproduces_using_external_inputs(acquisition):
+    session = ComparisonSession()
+    first = session.register(complete(acquisition), 'First')['id']
+    second = session.register(complete(acquisition), 'Second')['id']
+    package = session.export([first, second], {'raw_inputs': False, 'stages': [], 'auxiliary': False, 'tables': False})
+    external = ProcessingState();external.discover({'path': str(acquisition)})
+    imported = ComparisonSession()
+    result = imported.import_projects(package, external=external)
+    assert len(result['datasets']) == 2
+    assert [d['name'] for d in result['datasets']] == ['First', 'Second']
+    assert all(imported.get(d['id']).reproduction_report['status'] == 'exact' for d in result['datasets'])

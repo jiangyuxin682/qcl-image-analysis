@@ -9,6 +9,10 @@ export results before quitting. Analysis sessions are held in memory.
 
 ## Using the workbench
 
+For Python installation and running directly from source, see the
+[macOS / Windows installation guide](../ui/INSTALLATION.md). End users with a
+complete built application should instead follow [START_HERE.txt](START_HERE.txt).
+
 Follow the [new-user quick start](../ui/QUICKSTART.md) for file-chooser imports,
 the ten processing sections, multi-folder comparison, and exporting/reproducing
 projects. The [processing reference](../ui/README_PROCESSING.md) explains the

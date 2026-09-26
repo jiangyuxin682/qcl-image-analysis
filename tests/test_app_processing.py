@@ -1135,3 +1135,73 @@ def test_video_limits_pool_only_included_patterns_at_selected_band_and_stage(acq
         array = state.baselines[(frame['pattern'], 1658)].corrected
         png, _, _ = render_data_png(array, limits=expected)
         assert base64.b64decode(frame['png']) == png
+
+
+def test_baseline_skip_is_explicit_and_enabled_centers_still_validate(acquisition):
+    state = ProcessingState()
+    state.discover({'path': str(acquisition)})
+    payload = {'mapping': {'1080': []}, 'patterns': ['pattern0']}
+    with pytest.raises(ValueError, match='two distinct references'):
+        state.configure(payload)
+    with pytest.raises(ValueError, match='booleans'):
+        state.configure({**payload, 'baseline_enabled': {'1080': 'false'}})
+    result = state.configure({**payload, 'baseline_enabled': {'1080': False}})
+    assert result['baseline_enabled'] == {1080: False}
+    assert result['bands'] == [1080]
+    with pytest.raises(ValueError, match='bracket'):
+        state.configure({'mapping': {'1080': [], '1601': [1658, 1702]},
+                         'baseline_enabled': {'1080': False, '1601': True}, 'patterns': ['pattern0']})
+    assert state.baseline_enabled == {1080: False}  # Failed changes retain the committed configuration.
+
+
+def test_comparison_rename_and_remove_preserve_sources(acquisition, tmp_path):
+    import tempfile
+    from ui.app_processing import ComparisonSession
+    session = ComparisonSession()
+    a = session.register(complete(acquisition), 'A')['id']
+    b = session.register(complete(acquisition), 'B')['id']
+    original = session.get(a)
+    assert session.rename({'id': a, 'name': '  Sample \u65b0  '})['name'] == 'Sample \u65b0'
+    assert session.get(a) is original
+    with zipfile.ZipFile(io.BytesIO(session.export([a, b]))) as archive:
+        assert json.loads(archive.read('datasets.json'))[0]['name'] == 'Sample \u65b0'
+    for name in ['', '   ', 'x' * 161, None]:
+        with pytest.raises(ValueError, match='name'):
+            session.rename({'id': a, 'name': name})
+    source_files = list(acquisition.rglob('*.csv'))
+    assert source_files
+    work = tempfile.TemporaryDirectory(dir=tmp_path)
+    temporary_path = work.name
+    original._uploaded_inputs = work
+    assert session.remove({'id': a})['removed']
+    from pathlib import Path
+    assert not Path(temporary_path).exists()
+    assert all(path.exists() for path in source_files)
+    assert session.info([b])[0]['name'] == 'B'
+    with pytest.raises(ValueError, match='Unknown dataset'):
+        session.get(a)
+    with pytest.raises(ValueError, match='cannot be removed'):
+        session.remove({'id': 'default'})
+
+
+def test_comparison_removal_rejects_busy_dataset(acquisition):
+    import threading
+    from ui.app_processing import ComparisonSession
+    session = ComparisonSession()
+    item = session.add({'path': str(acquisition)})
+    dataset = session.get(item['id'])
+    held, release = threading.Event(), threading.Event()
+    def processing():
+        with dataset.lock:
+            held.set()
+            release.wait(5)
+    worker = threading.Thread(target=processing)
+    worker.start()
+    try:
+        assert held.wait(2)
+        with pytest.raises(ValueError, match='busy'):
+            session.remove({'id': item['id']})
+        assert session.get(item['id']) is dataset
+    finally:
+        release.set()
+        worker.join()

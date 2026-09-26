@@ -48,6 +48,8 @@ def encode_video(video, fps, labels):
     }[video["kind"]]
     if video.get("processing_basis") == "raw_intensity":
         stage = stage.replace("Reflectance", "Raw intensity")
+    if video["kind"] == "absorbance" and video.get("baseline_applied") is False:
+        stage = "Absorbance · baseline not applied"
     title = f"{video['wavenumber']} cm⁻¹ · {stage} · Contrast: {video['low']:g}–{video['high']:g} percentiles · FPS: {fps:g}"
     font_path = font_manager.findfont('DejaVu Sans')
     font = ImageFont.truetype(font_path, 20)

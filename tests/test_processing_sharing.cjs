@@ -16,13 +16,13 @@ function workspace(){
   return {datasets,context,send:(id,data)=>listener({origin:'local',source:datasets.find(d=>d.id===id).frame.contentWindow,data:{dataset:id,...data}})};
 }
 function settings(radius=30){return {mapping:{1658:[1601,1702]},fields:{'has-gold':'yes','reference-pixels':'100','rb-radius':String(radius),'r0-method':'brightest','r0-count':'5'}};}
-test('all groups default shared; new folders inherit current settings',()=>{
+test('spectral and processing sharing default off; new folders inherit only other shared settings',()=>{
   const w=workspace();w.send('a',{type:'shared',settings:settings()});
   w.send('b',{type:'ready'});
   const messages=w.datasets[1].messages;
   const policy=messages.find(m=>m.type==='sharing-policy');
-  assert.equal(policy.multiple,true);assert.deepEqual(Object.values(policy.sharing),[true,true,true,true]);
-  assert.deepEqual(messages.filter(m=>m.type==='shared').at(-1).settings,settings());
+  assert.equal(policy.multiple,true);assert.deepEqual(Object.values(policy.sharing),[false,true,false,true]);
+  assert.deepEqual(messages.filter(m=>m.type==='shared').at(-1).settings,{fields:Object.fromEntries(Object.entries(settings().fields).filter(([key])=>key!=='rb-radius'))});
 });
 test('disabled group remains independent; re-enabling uses first committed folder, not tab order or last editor',()=>{
   const w=workspace();w.send('a',{type:'shared',settings:settings(30)});
@@ -76,8 +76,8 @@ test('imported ZIP keeps committed settings instead of being overwritten by work
   assert.equal(w.datasets[0].messages.some(m=>m.type==='shared'&&m.settings.fields['rb-radius']==='50'),false);
 });
 
-test('first imported processed folder becomes the parameter source for unprocessed tabs',()=>{
-  const w=workspace();w.send('a',{type:'shared',settings:settings(30)});
+test('first imported processed folder becomes the parameter source for unprocessed tabs when sharing is enabled',()=>{
+  const w=workspace();w.send('a',{type:'sharing-toggle',group:'processing',enabled:true});w.send('a',{type:'shared',settings:settings(30)});
   w.send('b',{type:'ready',reproduced:true,settings:settings(50)});
   assert.equal(w.context.shared.fields['rb-radius'],'50');
   assert.equal(w.datasets[0].messages.some(m=>m.type==='shared'&&m.settings.fields['rb-radius']==='50'),true);

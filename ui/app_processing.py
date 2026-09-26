@@ -66,6 +66,8 @@ from qcl_analysis.roi import ROI
 from ui.app import render_data_png
 from ui.reproduction import (
     MAX_UPLOAD,
+    export_options,
+    AUXILIARY,
     result_filename,
     coordinates,
     reproduce,
@@ -254,7 +256,9 @@ class ProcessingState:
         self.reset_analysis()
 
     def reset_analysis(self):
+        self._applied_configuration = None
         self.mapping = {}
+        self.baseline_enabled = {}
         self.patterns = []
         self.bands = []
         self.raw = {}
@@ -309,6 +313,7 @@ class ProcessingState:
             "patterns": self.patterns,
             "bands": self.bands,
             "mapping": self.mapping,
+            "baseline_enabled": self.baseline_enabled,
             "has_gold": self.has_gold,
             "processing_basis": "reflectance" if self.has_gold else "raw_intensity",
             "on_roi": asdict(self.on_roi) if self.on_roi else None,
@@ -485,26 +490,34 @@ class ProcessingState:
     def configure(self, payload):
         self.require("discovered")
         mapping = {}
+        baseline_enabled = {}
+        flags = payload.get("baseline_enabled", {})
+        if not isinstance(flags, dict):
+            raise ValueError("baseline_enabled must map centers to booleans.")
         available = set(self.dataset.wavenumber)
         for center, refs in payload.get("mapping", {}).items():
             center = integer(center, "Center")
-            refs = [integer(v, "Reference") for v in refs]
+            enabled = flags.get(str(center), flags.get(center, True))
+            if not isinstance(enabled, bool):
+                raise ValueError("Baseline correction choices must be booleans.")
+            baseline_enabled[center] = enabled
+            refs = [integer(v, "Reference") for v in refs] if enabled else []
             if center not in available or not set(refs) <= available:
                 raise ValueError(
                     "Every center and reference must be an identified filename wavenumber."
                 )
-            if len(refs) < 2 or len(refs) != len(set(refs)) or center in refs:
+            if enabled and (len(refs) < 2 or len(refs) != len(set(refs)) or center in refs):
                 raise ValueError(
                     f"Center {center} needs at least two distinct references, excluding itself."
                 )
-            if not min(refs) < center < max(refs):
+            if enabled and not min(refs) < center < max(refs):
                 raise ValueError(
                     f"References must bracket center {center}; extrapolation is disabled."
                 )
             mapping[center] = sorted(refs)
         if not mapping:
             raise ValueError(
-                "Select at least one center and its baseline reference bands."
+                "Select at least one center wavenumber."
             )
         patterns = list(dict.fromkeys(payload.get("patterns", [])))
         if not patterns or not set(patterns) <= set(self.dataset.pattern):
@@ -530,6 +543,7 @@ class ProcessingState:
             )
         self.reset_analysis()
         self.mapping, self.patterns, self.bands = mapping, patterns, bands
+        self.baseline_enabled = baseline_enabled
         self.raw, self.qc = raw, selected
         self.stage = "configured"
         self.version += 1
@@ -1000,7 +1014,7 @@ class ProcessingState:
             records,
         )
         self.cnr_records, self.cnr_rois = [], None
-        self.stage = "absorbed"
+        self.stage = "absorbed" if any(self.baseline_enabled.values()) else "complete"
         self.version += 1
         return {**self.status(), "r0": records}
 
@@ -1008,9 +1022,10 @@ class ProcessingState:
         """Commit baseline correction separately from absorbance calculation."""
         self.require("absorbed")
         baselines = {}
-        for pattern in self.patterns:
+        mapping = {center: refs for center, refs in self.mapping.items() if self.baseline_enabled[center]}
+        for pattern in self.patterns if mapping else []:
             results = correct_absorbance_baselines(
-                {wn: self.absorbance[(pattern, wn)] for wn in self.bands}, self.mapping
+                {wn: self.absorbance[(pattern, wn)] for wn in self.bands}, mapping
             )
             baselines.update(
                 {(pattern, int(wn)): result for wn, result in results.items()}
@@ -1411,6 +1426,7 @@ class ProcessingState:
             "colorbar_zero": payload.get("colorbar_zero") in (True, "true", "1"),
             "processing_basis": "reflectance" if self.has_gold else "raw_intensity",
             "extrema_label": extrema_label,
+            "baseline_applied": self.baseline_enabled.get(wn, False),
             "video_id": uuid.uuid4().hex,
             "version": self.version,
             "frames": frames,
@@ -1424,18 +1440,18 @@ class ProcessingState:
         }
         return self.last_video
 
-    def restore_project(self, data):
+    def restore_project(self, data, *, external=None, mode="reproduce"):
         """Recompute in isolation, then atomically replace the current session."""
         self.set_progress(status="Starting reproduction", unit="steps", completed=0, total=7,
                           started=time.monotonic(), ended=None)
         try:
-            restored, _report = reproduce(data, self.set_progress)
+            restored, _report = reproduce(data, self.set_progress, external=external, mode=mode)
         except Exception:
             self.set_progress(status="Reproduction failed", ended=time.monotonic())
             raise
         self.adopt(restored)
-        self.set_progress(status="Reproduction complete", completed=7, total=7, ended=time.monotonic())
-        return self.restored_state()
+        self.set_progress(status="Settings loaded; processing not yet run" if mode == "apply" else "Reproduction complete", completed=7, total=7, ended=time.monotonic())
+        return self.applied_state() if mode == "apply" else self.restored_state()
 
     def adopt(self, other):
         old_inputs = [getattr(self, key, None) for key in ("_reproduction_inputs", "_uploaded_inputs")]
@@ -1448,6 +1464,15 @@ class ProcessingState:
             if work is not None:
                 work.cleanup()
 
+    def applied_state(self):
+        saved = self._applied_configuration
+        meta = saved['configuration']
+        return {**self.restored_state(), 'applied_settings': True,
+                'has_gold': meta['has_gold_patch_reference'], 'n_pixels': meta['n_reference_pixels'],
+                'qc_settings': meta['qc_settings'], 'parameters': saved['processing'],
+                'r0_selection': {k: v for k, v in meta['cell_free_selection'].items() if k in ('method', 'count')},
+                'discovery': self.discovery_state()}
+
     def restored_state(self):
         return {**self.status(), "path": str(self.path), "qc": self.qc.drop(columns="path").to_dict(orient="records"),
                 "r0": self.r0_records, "cnr": self.cnr_records, "cnr_rois": self.cnr_rois,
@@ -1457,8 +1482,9 @@ class ProcessingState:
                 "discovery": {"wavenumbers": self.bands, "files": len(self.raw),
                               "availability": [{"pattern": p, "wavenumbers": self.bands} for p in self.patterns]}}
 
-    def export(self):
+    def export(self, options=None):
         self.require("complete")
+        options = export_options(options)
         buffer = io.BytesIO()
         metadata = {
             "source": str(self.path),
@@ -1467,6 +1493,7 @@ class ProcessingState:
             "normalization_formula": "R = I_raw / mean(brightest N raw pixels per image)" if self.has_gold else None,
             "absorbance_formula": "-log10(corrected signal / mean(analyte-free corrected signal))",
             "centers_and_references": self.mapping,
+            "baseline_enabled": self.baseline_enabled,
             "patterns": self.patterns,
             "processed_wavenumbers": self.bands,
             "n_reference_pixels": self.n_pixels,
@@ -1501,11 +1528,11 @@ class ProcessingState:
                 "metadata.json",
                 json.dumps(clean_json(metadata), indent=2, allow_nan=False),
             )
-            z.writestr("quality_control.csv", self.qc.to_csv(index=False))
-            z.writestr(
-                "r0_summary.csv", pd.DataFrame(self.r0_records).to_csv(index=False)
-            )
-            if self.cnr_records:
+            if options["tables"]:
+                z.writestr("quality_control.csv", self.qc.to_csv(index=False))
+            if options["tables"]:
+                z.writestr("r0_summary.csv", pd.DataFrame(self.r0_records).to_csv(index=False))
+            if options["tables"] and self.cnr_records:
                 z.writestr(
                     "cnr_summary.csv",
                     pd.DataFrame(self.cnr_records).to_csv(index=False),
@@ -1546,11 +1573,11 @@ class ProcessingState:
                         key
                     ].valid_mask.astype(int)
                 for name, array in arrays.items():
-                    if array is not None:
+                    if array is not None and (name in options["stages"] or (options["auxiliary"] and name in AUXILIARY)):
                         output = io.StringIO()
-                        np.savetxt(output, array, delimiter=",")
+                        np.savetxt(output, array, delimiter=",", fmt="%d" if name.endswith("mask") and name != "fourier_mask" else "%.18e")
                         z.writestr(f"{folder}/{result_filename(name)}", output.getvalue())
-            write_project(z, self, metadata, clean_json)
+            write_project(z, self, metadata, clean_json, options)
         return buffer.getvalue()
 
 
@@ -1589,12 +1616,41 @@ class ComparisonSession:
         return {"id": dataset_id, "name": self.names[dataset_id], "path": str(dataset.path),
                 "reproduced": dataset.stage == "complete"}
 
-    def import_projects(self, data, name=""):
+    def rename(self, payload):
+        dataset_id, name = payload.get("id"), payload.get("name")
+        if not isinstance(name, str) or not name.strip() or len(name.strip()) > 160:
+            raise ValueError("Enter a dataset name between 1 and 160 characters.")
+        with self.lock:
+            self.get(dataset_id)
+            self.names[dataset_id] = name.strip()
+            return {"id": dataset_id, "name": self.names[dataset_id]}
+
+    def remove(self, payload):
+        dataset_id = payload.get("id")
+        if dataset_id == "default":
+            raise ValueError("The single-dataset session cannot be removed from comparison.")
+        with self.lock:
+            dataset = self.get(dataset_id)
+            if not dataset.lock.acquire(blocking=False):
+                raise ValueError("This dataset is busy. Wait for processing to finish before removing it.")
+            try:
+                for key in ("_uploaded_inputs", "_reproduction_inputs"):
+                    work = getattr(dataset, key, None)
+                    if work is not None:
+                        work.cleanup()
+                        setattr(dataset, key, None)
+                del self.datasets[dataset_id]
+                del self.names[dataset_id]
+            finally:
+                dataset.lock.release()
+        return {"id": dataset_id, "removed": True}
+
+    def import_projects(self, data, name="", *, external=None, mode="reproduce"):
         from ui.reproduction import project_members
         ready = []
         try:
             for label, package in project_members(data, name):
-                dataset, _report = reproduce(package)
+                dataset, _report = reproduce(package, external=external, mode=mode)
                 ready.append((dataset, label))
         except Exception:
             for dataset, _ in ready:
@@ -1616,7 +1672,7 @@ class ComparisonSession:
                     "cnr": dataset.cnr_records, "cnr_rois": dataset.cnr_rois})
         return result
 
-    def export(self, ids):
+    def export(self, ids, options=None):
         if len(set(ids)) < 2:
             raise ValueError("Choose at least two datasets.")
         output = io.BytesIO()
@@ -1624,7 +1680,7 @@ class ComparisonSession:
             for index, dataset_id in enumerate(dict.fromkeys(ids), 1):
                 dataset = self.get(dataset_id)
                 with dataset.lock:
-                    archive.writestr(f"dataset_{index}/results.zip", dataset.export())
+                    archive.writestr(f"dataset_{index}/results.zip", dataset.export(options))
             archive.writestr("datasets.json", json.dumps(clean_json(self.info(ids)), indent=2, allow_nan=False))
         return output.getvalue()
 
@@ -1660,6 +1716,7 @@ class Handler(BaseHTTPRequestHandler):
             "/line_profile.js": ("line_profile.js", "text/javascript; charset=utf-8"),
             "/pixel_axes.js": ("pixel_axes.js", "text/javascript; charset=utf-8"),
             "/image_tools.js": ("image_tools.js", "text/javascript; charset=utf-8"),
+            "/project_options.js": ("project_options.js", "text/javascript; charset=utf-8"),
             "/uploads.js": ("uploads.js", "text/javascript; charset=utf-8"),
         }
         try:
@@ -1670,7 +1727,7 @@ class Handler(BaseHTTPRequestHandler):
             if url.path == "/api/comparison-info":
                 return self.json(COMPARISON.info(query.get("ids", "").split(",")))
             if url.path == "/api/comparison-export":
-                return self.send(COMPARISON.export(query.get("ids", "").split(",")), "application/zip")
+                return self.send(COMPARISON.export(query.get("ids", "").split(","), json.loads(query["options"]) if "options" in query else None), "application/zip")
             session = COMPARISON.get(query.get("dataset", "default"))
             if url.path == "/api/process-progress":
                 return self.json(session.processing_progress())
@@ -1678,6 +1735,8 @@ class Handler(BaseHTTPRequestHandler):
                 if url.path == "/api/status":
                     return self.json(session.status())
                 if url.path == "/api/bootstrap":
+                    if session.stage == "configured" and session._applied_configuration:
+                        return self.json({"kind": "reproduced", "state": session.applied_state()})
                     if session.stage == "complete":
                         return self.json({"kind": "reproduced", "state": session.restored_state()})
                     session.require("discovered")
@@ -1689,7 +1748,7 @@ class Handler(BaseHTTPRequestHandler):
                         session.image({k: v[0] for k, v in parse_qs(url.query).items()})
                     )
                 if url.path == "/api/export":
-                    data = session.export()
+                    data = session.export(json.loads(query["options"]) if "options" in query else None)
                     self.send_response(200)
                     self.send_header("Content-Type", "application/zip")
                     self.send_header(
@@ -1727,12 +1786,15 @@ class Handler(BaseHTTPRequestHandler):
                 with tempfile.TemporaryFile() as upload:
                     copy_upload(self.rfile, upload, length)
                     upload.seek(0)
+                    query = {k: v[0] for k, v in parse_qs(url.query).items()}
+                    external = COMPARISON.get(query['raw_dataset']) if query.get('raw_dataset') else None
+                    mode = query.get('mode', 'reproduce')
                     if url.path == "/api/datasets/reproduce":
                         name = parse_qs(url.query).get("name", [""])[0]
-                        return self.json(COMPARISON.import_projects(upload, name))
+                        return self.json(COMPARISON.import_projects(upload, name, external=external, mode=mode))
                     session = COMPARISON.get(parse_qs(url.query).get("dataset", ["default"])[0])
                     with session.lock:
-                        return self.json(session.restore_project(upload))
+                        return self.json(session.restore_project(upload, external=external, mode=mode))
             if url.path in {"/api/upload-data", "/api/datasets/upload"}:
                 if not 0 < length <= MAX_UPLOAD:
                     raise ValueError("Selected upload must be no larger than 1 GiB.")
@@ -1762,6 +1824,10 @@ class Handler(BaseHTTPRequestHandler):
                     return self.json(session.discovery_state())
             if url.path == "/api/datasets":
                 return self.json(COMPARISON.add(payload))
+            if url.path == "/api/datasets/rename":
+                return self.json(COMPARISON.rename(payload))
+            if url.path == "/api/datasets/remove":
+                return self.json(COMPARISON.remove(payload))
             session = COMPARISON.get(parse_qs(url.query).get("dataset", ["default"])[0])
             if url.path == "/api/export-video":
                 with session.lock:

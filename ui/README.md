@@ -11,6 +11,10 @@ R0, and absorbance calculations.
 
 ## First-time setup
 
+New users: follow the [macOS / Windows installation guide](INSTALLATION.md)
+first, including Python 3.12 and dependencies. Then use the legacy launchers below
+instead of the Processing launcher.
+
 - macOS: double-click `setup_macos.command`.
 - Windows: double-click `setup_windows.bat`.
 
@@ -22,7 +26,9 @@ dependencies. Python 3.12 is required.
 - macOS: double-click `launch_macos.command`.
 - Windows: double-click `launch_windows.bat`.
 
-Or, from the repository root:
+Or, from the repository root with the project environment active
+(use `.venv/bin/python` on macOS or `.\.venv\Scripts\python.exe` on Windows
+in place of `python` if it is not active):
 
 ```bash
 python ui/app.py

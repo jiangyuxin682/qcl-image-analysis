@@ -36,6 +36,17 @@ window.QCLImages = (() => {
     image.src='data:image/svg+xml;charset=utf-8,'+encodeURIComponent(new XMLSerializer().serializeToString(copy));
     await image.decode();return image;
   }
+  function drawScientificText(ctx,text,x,y){
+    const expression=/\b([IRA]|sigma)_([a-z]+|0)|σ_([a-z]+)/g;
+    if(!expression.test(text)){ctx.fillText(text,x,y);return;}
+    expression.lastIndex=0;ctx.save();const font=ctx.font,size=Number(/([\d.]+)px/.exec(font)?.[1]||15);let end=0;
+    for(const match of text.matchAll(expression)){
+      const plain=text.slice(end,match.index)+(match[1]==='sigma'?'σ':match[1]||'σ');
+      ctx.font=font;ctx.fillText(plain,x,y);x+=ctx.measureText(plain).width;
+      const sub=match[2]||match[3];ctx.font=font.replace(/[\d.]+px/,`${size*.75}px`);ctx.fillText(sub,x,y+size*.25);x+=ctx.measureText(sub).width;end=match.index+match[0].length;
+    }
+    ctx.font=font;ctx.fillText(text.slice(end),x,y);ctx.restore();
+  }
   async function download(image,data,title,filename,card,details={}){
     const w=Math.max(600,data.width),h=Math.round(w*data.height/data.width),out=document.createElement('canvas');
     const ctx=out.getContext('2d');
@@ -61,7 +72,7 @@ window.QCLImages = (() => {
     out.width=w+220;out.height=profile?profileTop+profileHeight+24:imageTop+h+74;
     ctx.fillStyle='white';ctx.fillRect(0,0,out.width,out.height);ctx.fillStyle='#213a35';
     ctx.font='bold 18px sans-serif';titles.forEach((line,i)=>ctx.fillText(line,20,24+i*26));
-    ctx.font='15px sans-serif';lines.forEach((line,i)=>ctx.fillText(line,20,24+titles.length*26+i*22));
+    ctx.font='15px sans-serif';lines.forEach((line,i)=>drawScientificText(ctx,line,20,24+titles.length*26+i*22));
     ctx.save();ctx.translate(80+(flip.horizontal?w:0),imageTop+(flip.vertical?h:0));
     ctx.scale(flip.horizontal?-1:1,flip.vertical?-1:1);ctx.drawImage(image,0,0,w,h);
     const svg=card.querySelector('.roi-overlay');
@@ -87,5 +98,5 @@ window.QCLImages = (() => {
     const colors={gray_r:['white','black'],gray:['black','white'],magenta:['black','#ff00ff'],yellow:['black','#ffff00'],blue:['black','#0000ff']};
     strip.style.background=colors[name]?`linear-gradient(to top, ${colors[name].join(', ')})`:'';
   }
-  return {orientation,eventPoint,download,setColorbar};
+  return {orientation,eventPoint,download,setColorbar,drawScientificText};
 })();

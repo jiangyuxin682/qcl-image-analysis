@@ -1,24 +1,27 @@
 # QCL Processing Workbench
 
-New here? Start with the [new-user quick start](QUICKSTART.md) for installation,
-a first dataset, saving projects and troubleshooting. This page is the detailed
-reference for the current ten-section interface.
+For first-time users, follow the [macOS / Windows installation guide](INSTALLATION.md)
+for Python 3.12, virtual environments, dependencies, launch commands and FFmpeg.
+Then follow the [step-by-step user guide](QUICKSTART.md) for the current ten-section
+interface. Both guides use English explanations and the exact UI labels.
+This page is the detailed technical reference.
 
-Run `python ui/app_processing.py` from the repository in the Python 3.12 `qcl`
-environment, or use `ui/launch_processing_macos.command` on macOS. The separate
-interface opens at http://127.0.0.1:8766. The original `ui/app.py` remains intact.
-Install the project with `python -m pip install -e '.[ui,dev]'` if needed.
-
-On Windows, run `ui/setup_windows.bat` once, then
-`ui/launch_processing_windows.bat`. For a standalone EXE with all runtime
-dependencies included, follow [Windows packaging](../packaging/README.md).
+Install with `python -m pip install -e ".[ui]"` in a Python 3.12 environment,
+then run `python ui/app_processing.py` from the repository root. The source app
+opens at http://127.0.0.1:8766; use `--port 8776` if that port is occupied.
+The installation guide gives explicit virtual-environment paths for each OS,
+so activation is not required. Keep the server running and export before exit.
+For a Windows application with bundled dependencies, see
+[Windows packaging](../packaging/README.md). The separate `ui/app.py` is the legacy UI.
 
 ## How the workflow works
 
 1. Use the file chooser to select a stacks directory, a pattern directory, an
    acquisition directory with a stacks child, or spectral CSV files from one pattern. Wavenumbers come only from filenames
    `lineScan_<integer>_0invcm.csv`; there is no manual wavenumber entry field.
-2. Select center bands and at least two references per center. References must
+2. Select center bands. Each center has an **Apply baseline correction** switch.
+   Turn it off to process without reference bands (the default for a single-band
+   acquisition). Enabled centers require at least two distinct references that
    bracket the center and exclude the center itself. The union of all center
    and reference bands is the processing set. Select one or more complete
    patterns; missing-band patterns are shown and cannot be selected.
@@ -32,9 +35,10 @@ dependencies included, follow [Windows packaging](../packaging/README.md).
 4. Draw one shared on-MS ROI on the selected signal (raw intensity without gold,
    reflectance with gold), checking alignment across bands/patterns. Gold drift
    tracking is available only with a gold reference.
-5. Apply paired Gaussian notches or an elliptical Gaussian low-pass, then a
-   rolling-ball multiplicative flat-field correction to every selected image.
-   Fourier can be bypassed explicitly. Parameter meanings appear next to the
+5. Optionally apply paired Gaussian notches or an elliptical Gaussian low-pass,
+   then rolling-ball multiplicative flat-field correction to every selected image.
+   Both enable switches default off; commit **Process all involved bands** even
+   when both are disabled. Parameter meanings appear next to the
    controls. Inspection-window settings affect only the spectrum preview.
 6. Choose a shared rectangular analyte-free ROI, or select a fixed number of the
    brightest or darkest valid pixels in a chosen reference band for each pattern.
@@ -46,15 +50,21 @@ dependencies included, follow [Windows packaging](../packaging/README.md).
    image gets its own R0 and absorbance. Baseline correction is calculated
    separately in Section 7. Two references interpolate; more fit least squares.
 7. Calculate baseline correction separately, compare absorbance before and after
-   correction, and inspect individual pixel fits.
-8. Inspect six stages with gold, or five without gold, using inferno. Every image has an independent colorbar calculated from its own values. Draw CNR background and target ROIs shared across stages within the
+   correction, and inspect individual pixel fits. Only enabled centers are fitted;
+   skipped centers have no corrected-baseline array. If all centers skip baseline,
+   Section 6 unlocks **Continue to CNR** and Section 7 is marked **Skipped**.
+8. Inspect the available stages using inferno. Reflectance is omitted without gold,
+   and after-baseline images are omitted for skipped centers. Every image has an independent colorbar calculated from its own values. Draw CNR background and target ROIs shared across stages within the
    dataset, or reuse the exact Section 6 analyte-free selection as background.
    Horizontal/vertical line profiles sample the same positions across stages.
 9. Optionally build a timelapse of the selected patterns, or click **Skip Timelapse**.
-10. **Export results:** choose a filename and download the reproducible project
-   ZIP with selected inputs, parameters, metadata, masks, QC, R0 and CNR results.
-   Gold-normalized exports include full-image normalization pixel coordinates.
-   Raw-only exports omit reflectance arrays. Metadata records the signal basis.
+10. **Export results:** choose a filename and export a lightweight project by
+   default. Required settings and selections remain included; full raw inputs,
+   stage CSVs, auxiliary arrays and summary tables are selectable. Lightweight
+   projects need matching external raw data to reproduce. Include raw inputs for
+   a self-contained numerical project. Gold-normalized exports preserve reference
+   pixel selections; raw-only exports omit reflectance arrays. PNGs and videos
+   are downloaded separately.
 
 The new processing path follows notebook 06's on-MS workflow. The original app
 still provides its independent on-MS/out-MS workflow. This interface also
@@ -210,7 +220,7 @@ any section; a folder that has not reached that section opens its latest
 available step. The original single-folder interface remains available.
 
 Sections 2, 3, 5 and 6 each have a workspace-wide sharing switch, visible when
-multiple folder tabs exist. All four default on:
+multiple folder tabs exist. Sections 2 and 5 default off; Sections 3 and 6 default on:
 
 - Section 2: center/reference wavenumber mappings.
 - Section 3: gold-reference choice, pixel count and QC thresholds.
@@ -229,11 +239,11 @@ reference bands, search bounds, CNR background source/ROIs and display limits
 remain independent. No spatial selection is copied between folders.
 
 After calculating CNR in every folder, open Final comparison. Select a common
-stage and wavenumber, and independently choose each folder's pattern and display
+stage, use a common wavenumber or select a different band per folder, and choose each folder's pattern and display
 percentiles. Each image has its own colorbar, CNR parameters and ROI outlines.
 The page checks that committed settings agree only for groups whose sharing
 switch is on. Different settings are allowed for groups switched off; comparison
-still requires a common stage and wavenumber.
+still uses a common stage. Wavenumbers may differ when per-folder selection is enabled.
 Export all datasets downloads one ZIP with a result archive per folder and a
 JSON dataset/CNR summary. All datasets remain in local server memory; restarting
 the server clears them, and reloading the workspace resets the browser tabs.
@@ -362,9 +372,13 @@ The chart uses the same actual-value sampling and distance axis as Section 8.
 Neither selecting nor clearing a line changes CNR or its ROI overlays.
 
 
-## Reproducible project ZIP (format version 1)
+## Reproducible project ZIP (format version 2; version 1 import supported)
 
-Section 10 exports a self-contained project. Enter a **ZIP file name** before
+Section 10 defaults to a lightweight settings project with summary CSV tables.
+Select **Complete reproducible project** to include raw inputs and every stage,
+or use **Custom export** to choose raw inputs, individual stage CSVs, auxiliary
+arrays and summary tables. Required parameters, saved coordinates, input identities,
+checksums and environment information cannot be deselected. Enter a **ZIP file name** before
 downloading (default `qcl-processing.zip`). Final comparison has its own filename
 field (default `qcl-folder-comparison.zip`). Chinese names are supported; an
 omitted `.zip` is added, invalid filename characters are replaced, and a blank
@@ -373,20 +387,25 @@ name uses the default. The browser determines the download location.
 Result CSVs use the descriptive filenames listed below. Metadata remains
 compatible, and older project filenames are accepted on import. The ZIP also includes:
 
-- `inputs/*.npy`: full, uncropped raw images as lossless float64 arrays. They
+- `inputs/*.npy` (optional): full, uncropped raw images as lossless float64 arrays. They
   cover selected patterns and involved bands only. These are the actual loaded
   numerical inputs, not a later reread of original files or their CSV formatting.
 - `recipe.json`: complete effective parameters, spectral configuration, committed
   crop positions and reference selections, QC and CNR configuration.
 - `environment.json`: Python/package versions, Git commit/dirty status when
   available, and SHA-256 fingerprints of numerical processing source files.
+- `verification.json`: per-array fingerprints for all results, plus QC records,
+  even when the corresponding CSVs are omitted.
 - `manifest.json`: format version and size/SHA-256 inventory for every other file.
 - `reproduction_report.json`: verification report when exporting a reproduced
   session whose numerical results have not subsequently been recalculated.
 
 In the standalone Section 1 interface, choose **Import processing ZIP**, select
 a previously exported project, and click **Reproduce processing**. The original
-source directory is not needed. The importer validates the package, builds an
+source directory is not needed when raw inputs are embedded. For lightweight
+projects, choose a local raw folder or spectral CSV files. External inputs must
+match the recorded pattern/band, shape and numerical fingerprint; they replace
+the ZIP inputs only, not its parameters or saved selections. The importer validates the package, builds an
 isolated session, reruns Sections 2–8 using the currently installed code, then
 replaces the active session only after successful processing and verification.
 Checksum/schema/processing failures leave the prior session intact. Numerical
@@ -399,6 +418,9 @@ CNR are recalculated. Saved result arrays are used only as verification targets.
 The report checks shapes, invalid-value positions, arrays/masks, reference
 levels, R0, QC and CNR. It distinguishes exact agreement, agreement within
 `rtol=1e-10, atol=1e-12`, and mismatches, with numerical error statistics.
+Omitted arrays are verified by exact numerical fingerprint. A changed fingerprint
+without the original result array is marked **unverified**, not within tolerance
+and not a proven numerical mismatch. Version 1 projects retain CSV-based checking.
 Environment differences are reported separately; no code from the archive is executed
 and no dependencies are installed automatically.
 
@@ -411,7 +433,7 @@ accepts one or more project ZIPs and the complete multi-dataset export ZIP;
 its contained projects are reproduced into separate tabs. Dataset names are
 retained from multi-dataset bundles. Sharing switches, Section 1 spectra, line
 plots, video settings and per-image display preferences are not restored. Previously
-exported ZIPs without a manifest/full inputs cannot be replayed; re-export from
+exported result-only ZIPs without a manifest cannot be replayed; re-export from
 a processed session using this version. Uploads are limited to 1 GiB compressed
 and 4 GiB expanded. Archive members are never extracted to arbitrary paths.
 
@@ -610,3 +632,44 @@ video range, unselected patterns, QC-excluded frames, other bands and other
 stages do not contribute. Custom percentiles apply to the combined frame values;
 the explicit zero-limit switch can still set the lower display bound to zero.
 The preview and exported MP4 retain the same limits on every frame.
+
+### Independent wavenumbers in Final comparison
+
+Disable spectral sharing in Section 2 when folders need different centers or
+references. In Final comparison, use **Wavenumber selection → Choose wavenumber
+per folder** (the default) to add a band selector alongside each folder’s Pattern selector.
+The image stage remains shared. Each card’s metrics, profile and PNG use its
+selected band, and the card lists that band and its baseline references or skipped
+status. Optional shared color limits use the extrema of these selected images;
+manual limits remain available. Switching stages retains valid selections and
+requires explicit reselection if a selected band has no result at the new stage.
+
+Processing ZIPs save `baseline_enabled` per center and omit corrected-baseline CSVs
+for skipped centers. Replay honors the saved choices; older ZIPs without this field
+retain the historical baseline-enabled behavior. Timelapse baseline selection
+includes only enabled centers; when none exist, the default becomes absorbance.
+
+Double-click a dataset tab name to rename it; click the adjacent **×** to remove it. Renaming updates comparison cards, PNG titles and the dataset names saved in comparison ZIPs. Removing a tab discards its in-session processing and temporary imported copies, never the original input folder or saved ZIP. Tab management is disabled during processing or import.
+
+### Apply saved settings to new raw data
+
+Both project import interfaces offer **Apply saved settings to new raw data**.
+Choose a local folder or CSV files. This loads the spectral mapping, baseline
+choices, normalization, Fourier/rolling settings and analyte-free method/count
+into an isolated configured dataset, then opens Section 3. All new patterns must
+have the required bands. Old gold/analyte-free pixel positions, crop/drift ROIs,
+CNR ROIs and old results are not reused. Confirm normalization and select new
+spatial regions before processing. This mode produces no reproduction claim.
+
+Both standalone and comparison exports expose the same content choices.
+Comparison choices apply to every included dataset. For external-input imports
+of bundles whose datasets need different raw folders, import each inner
+`results.zip` separately with its own raw source. Existing 1 GiB compressed /
+4 GiB expanded import limits still apply; use lightweight export for large runs.
+
+When shared settings block Final comparison, **Why comparison is blocked** lists
+conflicting enabled sections (2, 3, 5 or 6), each dataset's differing saved values,
+and **Open Section** buttons. Sharing is workspace-wide, so the table marks it ON
+for all folders rather than implying independent per-tab switches. Incomplete
+processing/CNR is reported alongside parameter conflicts. Disabled sharing groups
+are excluded from the comparison gate and its diagnostics.
