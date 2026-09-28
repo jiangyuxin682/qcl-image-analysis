@@ -131,7 +131,7 @@ function renderMapping(){
   }
   mappingChanged();
 }
-function mappingChanged(){const oldPreview=$('#roi-spectrum-band').value;updateROISpectrumBands();if(oldPreview!==$('#roi-spectrum-band').value)loadROISpectrumImage();updateROIMarkers();invalidateFrom(3);publishShared();const wns=involved();$('#involved-bands').textContent=wns.length?`All involved wavenumbers: ${wns.join(' · ')} cm⁻¹`:'Select centers and reference bands.';renderPatterns()}
+function mappingChanged(){roiSpectra.markerMapping=null;const oldPreview=$('#roi-spectrum-band').value;updateROISpectrumBands();if(oldPreview!==$('#roi-spectrum-band').value)loadROISpectrumImage();updateROIMarkers();invalidateFrom(3);publishShared();const wns=involved();$('#involved-bands').textContent=wns.length?`All involved wavenumbers: ${wns.join(' · ')} cm⁻¹`:'Select centers and reference bands.';renderPatterns()}
 function renderPatterns(){const root=$('#pattern-options');const previous=new Set($$('input[data-pattern]:checked').map(n=>n.value));const initial=!root.children.length;root.replaceChildren();const required=involved();for(const [index,p] of state.discovery.availability.entries()){const missing=required.filter(w=>!p.wavenumbers.includes(w));const label=el('label',undefined,'pattern');const input=el('input');input.type='checkbox';input.dataset.pattern='true';input.value=p.pattern;input.disabled=missing.length>0;input.checked=!missing.length&&(previous.has(p.pattern)||(initial&&index===0));input.onchange=()=>invalidateFrom(3);label.append(input,document.createTextNode(p.pattern),el('small',missing.length?` ${missing.join(', ')}`:`${p.wavenumbers.length} wavenumber`));root.append(label)}}
 function acceptDiscoveredData(d){resetROISpectrum();clearLineProfile();clearBaselineInspection();reproductionReport=null;$('#reproduction-report').hidden=true;state.cnr=[];state.r0=[];state.cnrDirty=true;state.rois={on:null,r0:null,background:null,target:null};state.discovery=d;state.mapping={};state.baseline_enabled={};state.patterns=[];state.bands=[];state.version=d.version;$('#center-options').replaceChildren();$('#pattern-options').replaceChildren();$('#reference-mapping').replaceChildren();for(const wn of d.wavenumbers)$('#center-options').append(checkbox(wn,false,on=>{chooseCenter(wn,on)}));$('#discovered-bands').replaceChildren(...d.wavenumbers.map(w=>el('span',`${w} cm⁻¹`,'chip')));$('#discovery-count').textContent=`${d.files} image · ${d.availability.length}  patterns`;$('#discovery-summary').hidden=false;renderPatterns();unlock(2);$('#session-status').textContent=` ${d.wavenumbers.length} wavenumber`;notify('Wavenumbers detected. Inspect ROI spectra below, then continue to spectral configuration.');go(1);prepareROISpectrum();}
 $('#data-input-kind').onchange=()=>{const folder=$('#data-input-kind').value==='folder';$('#data-folder-label').hidden=!folder;$('#data-files-label').hidden=folder;};
@@ -547,7 +547,7 @@ for(const id of ['reference-pixels','qc-z','qc-deviation'])$(`#${id}`).onchange=
 renderNav();filterMode();r0Mode();
 
 // Do not export an older CNR measurement after its visible ROIs are edited.
-$('#download').onclick=e=>{if(state.maxStep<10||state.cnrDirty||((state.rois.background||state.rois.target)&&!state.cnr.length)){e.preventDefault();notify('ROI or contrast settings changed. Recalculate CNR before exporting.',true)}};
+$('#download').onclick=async e=>{if(state.maxStep<10||state.cnrDirty||((state.rois.background||state.rois.target)&&!state.cnr.length)){e.preventDefault();notify('ROI or contrast settings changed. Recalculate CNR before exporting.',true);return;}e.preventDefault();try{if(projectExport.options().spectrum!=='none')await spectrumSave;const a=document.createElement('a');a.href=$('#download').href;a.download=$('#download').download;a.click();}catch(error){notify('Full spectrum save failed. Recalculate it before exporting: '+error.message,true)}};
 
 function processingParameters(){const mode=$('#filter-mode').value;const fourier={enabled:$('#fourier-enabled').checked,mode,centers:$('#fourier-enabled').checked&&['notch','combined'].includes(mode)?notchCenters():[],sigma_x:+$('#notch-sigma-x').value,sigma_y:+$('#notch-sigma-y').value,strength:+$('#notch-strength').value,protect_radius:+$('#protect-radius').value,cutoff_x:+$('#cutoff-x').value,cutoff_y:+$('#cutoff-y').value,pad_pixels:+$('#fourier-pad').value,preserve_mean:true};const rolling={enabled:$('#rolling-enabled').checked,radius:+$('#rb-radius').value,kernel_height:+$('#rb-height').value,feature_polarity:$('#rb-polarity').value,smooth_sigma:+$('#rb-sigma').value,pad_pixels:+$('#rb-pad').value,min_background:1e-6,reference_level:null};return {fourier,rolling};}
 
@@ -715,6 +715,7 @@ function clearROISpectrumResult(){
   $('#roi-spectrum-table').replaceChildren();drawROICharts();
 }
 function resetROISpectrum(){
+  roiSpectra.markerMapping=null;
   roiSpectra.revision++;roiSpectra.image=null;roiSpectra.rois={};roiSpectra.drag=null;
   clearROISpectrumResult();$('#roi-spectrum-panel').hidden=true;
 }
@@ -773,7 +774,7 @@ $('#roi-spectrum-calculate').onclick=async()=>{
   const revision=++roiSpectra.revision;clearROISpectrumResult();$('#roi-spectrum-calculate').disabled=true;$('#roi-spectrum-status').textContent='Reading spectral images…';
   try{
     const d=await api('/api/raw-roi-spectrum',{pattern:$('#roi-spectrum-pattern').value,wavenumber:+$('#roi-spectrum-band').value,...roiSpectra.rois});
-    if(revision!==roiSpectra.revision)return;roiSpectra.result=d;drawROICharts();table($('#roi-spectrum-table'),d.points,['wavenumber','I','I_bg','ratio','absorbance','status']);$('#roi-spectrum-export').disabled=false;updateROISmoothing();
+    if(revision!==roiSpectra.revision)return;roiSpectra.result=d;drawROICharts();table($('#roi-spectrum-table'),d.points,['wavenumber','I','I_bg','ratio','absorbance','status']);$('#roi-spectrum-export').disabled=false;await updateROISmoothing();
     $('#roi-spectrum-status').textContent=`${d.pattern} · ${d.points.length} measured bands · ${d.analyte_pixels} analyte pixels · ${d.background_pixels} background pixels · ${d.points.filter(p=>p.status!=='valid').length} invalid bands.${d.missing_wavenumbers.length?' Missing bands: '+d.missing_wavenumbers.join(', ')+' cm⁻¹.':''}`;
   }catch(e){if(revision===roiSpectra.revision)$('#roi-spectrum-status').textContent=e.message;}
   finally{if(revision===roiSpectra.revision)drawROISpectrumImage();}
@@ -822,11 +823,11 @@ $('#assign-spectrum-bands').onclick=()=>{
 $('#finish-spectrum-bands').onclick=()=>{$('#inline-band-editor').hidden=true;drawROICharts();};
 function roiMarkerGroups(){
   const palette=['#d05d00','#1765bf','#17804b','#a33b8b','#876324','#008b8b'],selected=$('#roi-marker-center').value;
-  return Object.entries(state.mapping).sort((a,b)=>+a[0]-b[0]).map(([center,refs],i)=>({center,refs,color:palette[i%palette.length]})).filter(g=>selected==='all'||selected===g.center);
+  return Object.entries(roiSpectra.markerMapping||state.mapping).sort((a,b)=>+a[0]-b[0]).map(([center,refs],i)=>({center,refs,color:palette[i%palette.length]})).filter(g=>selected==='all'||selected===g.center);
 }
 function updateROIMarkers(){
   const select=$('#roi-marker-center'),previous=select.value;
-  fillSelect(select,['all',...Object.keys(state.mapping).sort((a,b)=>a-b)],previous);
+  fillSelect(select,['all',...Object.keys(roiSpectra.markerMapping||state.mapping).sort((a,b)=>a-b)],previous);
   select.options[0].textContent='All centers';
   for(const o of [...select.options].slice(1))o.textContent=o.value+' cm⁻¹';
   const legend=$('#roi-marker-status');legend.replaceChildren(el('span','Vertical dashed lines: each center and its baseline references share one color. '));
@@ -834,16 +835,51 @@ function updateROIMarkers(){
   drawROICharts();
 }
 $('#roi-marker-center').onchange=updateROIMarkers;
+let spectrumSave=Promise.resolve();
+function saveSpectrumProject(){
+  const d=roiSpectra.result;if(!d)return Promise.resolve();
+  const settings={selection:{pattern:d.pattern,wavenumber:d.wavenumber,analyte_roi:d.analyte_roi,background_roi:d.background_roi},
+    filters:{fourier_enabled:$('#roi-fourier-enabled').checked,sg_enabled:$('#roi-sg-enabled').checked,fourier_mode:$('#roi-fourier-mode').value,cutoff:+$('#roi-fourier-cutoff').value,notch_centers:$('#roi-notch-centers').value.trim().split(/[,;\s]+/).filter(Boolean).map(Number),notch_width:+$('#roi-notch-width').value,window:+$('#roi-sg-window').value,order:+$('#roi-sg-order').value},
+    view:{mapping:roiSpectra.markerMapping||state.mapping,marker_center:$('#roi-marker-center').value,colorbar_zero:zeroColorbars.has('roi-raw')}};
+  const payload=JSON.parse(JSON.stringify(settings));
+  spectrumSave=spectrumSave.catch(()=>{}).then(()=>api('/api/save-spectrum',payload));
+  return spectrumSave;
+}
+async function restoreSpectrumProject(saved){
+  const {settings,result,filtered}=saved;
+  $('#roi-spectrum-panel').hidden=false;
+  fillSelect($('#roi-spectrum-pattern'),state.discovery.availability.map(p=>p.pattern),result.pattern);
+  updateROISpectrumBands();
+  if(![...$('#roi-spectrum-band').options].some(o=>+o.value===result.wavenumber)){
+    const option=el('option',String(result.wavenumber));option.value=result.wavenumber;$('#roi-spectrum-band').append(option);
+  }
+  $('#roi-spectrum-band').value=result.wavenumber;
+  if(settings.view?.colorbar_zero)zeroColorbars.add('roi-raw');
+  roiSpectra.rois={analyte_roi:result.analyte_roi,background_roi:result.background_roi};
+  const fields={'roi-fourier-enabled':'fourier_enabled','roi-sg-enabled':'sg_enabled','roi-fourier-mode':'fourier_mode','roi-fourier-cutoff':'cutoff','roi-notch-width':'notch_width','roi-sg-window':'window','roi-sg-order':'order'};
+  for(const [id,key] of Object.entries(fields)){const node=$('#'+id),value=settings.filters[key];if(value!=null){if(node.type==='checkbox')node.checked=value;else node.value=value;}}
+  $('#roi-notch-centers').value=(settings.filters.notch_centers||[]).join(', ');
+  await loadROISpectrumImage();roiSpectra.result=result;roiSpectra.sg=filtered;
+  roiSpectra.markerMapping=settings.view?.mapping||null;
+  const sf=settings.filters,mode=sf.fourier_mode;
+  $('#roi-sg-window').disabled=$('#roi-sg-order').disabled=!sf.sg_enabled;
+  $('#roi-fourier-mode').disabled=!sf.fourier_enabled;$('#roi-fourier-cutoff').disabled=!sf.fourier_enabled||mode==='notch';
+  $('#roi-notch-centers').disabled=$('#roi-notch-width').disabled=!sf.fourier_enabled||mode==='lowpass';
+  updateROIMarkers();$('#roi-marker-center').value=settings.view?.marker_center||'all';drawROICharts();drawROISpectrumImage();
+  table($('#roi-spectrum-table'),result.points.map((p,i)=>({...p,absorbance_fourier:filtered?.absorbance_fourier?.[i],absorbance_sg:filtered?.absorbance_sg?.[i],absorbance_filtered:filtered?.absorbance_filtered?.[i]})),['wavenumber','I','I_bg','ratio','absorbance','absorbance_fourier','absorbance_sg','absorbance_filtered','status']);
+  $('#roi-spectrum-export').disabled=false;
+  $('#roi-spectrum-status').textContent=`Restored and recalculated full spectrum · ${result.points.length} measured bands. Verification is included in Section 10.`;
+}
 async function updateROISmoothing(){
   const revision=++roiSpectra.sgRevision,sg=$('#roi-sg-enabled').checked,fourier=$('#roi-fourier-enabled').checked;
   $('#roi-sg-window').disabled=$('#roi-sg-order').disabled=!sg;const mode=$('#roi-fourier-mode').value;$('#roi-fourier-mode').disabled=!fourier;$('#roi-fourier-cutoff').disabled=!fourier||mode==='notch';$('#roi-notch-centers').disabled=$('#roi-notch-width').disabled=!fourier||mode==='lowpass';
   roiSpectra.sg=null;drawROICharts();const d=roiSpectra.result;
-  if(!sg&&!fourier||!d){$('#roi-sg-status').textContent=(sg||fourier)?'Calculate a spectrum first.':'';if(d)$('#roi-spectrum-export').disabled=false;return;}
+  if(!sg&&!fourier||!d){$('#roi-sg-status').textContent=(sg||fourier)?'Calculate a spectrum first.':'';if(d){$('#roi-spectrum-export').disabled=false;try{await saveSpectrumProject();}catch(e){notify('Full spectrum could not be saved for export: '+e.message,true);}}return;}
   $('#roi-spectrum-export').disabled=true;$('#roi-sg-status').textContent='Applying spectral filters…';
   try{
     const result=await api('/api/roi-spectrum-filter',{wavenumbers:d.points.map(p=>p.wavenumber),absorbance:d.points.map(p=>p.absorbance),sg_enabled:sg,fourier_enabled:fourier,fourier_mode:mode,notch_centers:$('#roi-notch-centers').value.trim().split(/[,;\s]+/).filter(Boolean).map(Number),notch_width:+$('#roi-notch-width').value,cutoff:+$('#roi-fourier-cutoff').value,window:+$('#roi-sg-window').value,order:+$('#roi-sg-order').value});
     if(revision!==roiSpectra.sgRevision||d!==roiSpectra.result)return;
-    roiSpectra.sg=result;drawROICharts();
+    roiSpectra.sg=result;drawROICharts();await saveSpectrumProject();
     table($('#roi-spectrum-table'),d.points.map((p,i)=>({...p,absorbance_fourier:result.absorbance_fourier?.[i],absorbance_sg:result.absorbance_sg?.[i],absorbance_filtered:result.absorbance_filtered[i]})),['wavenumber','I','I_bg','ratio','absorbance','absorbance_fourier','absorbance_sg','absorbance_filtered','status']);
     $('#roi-sg-status').textContent=[fourier?`Fourier ${result.fourier_mode}: ${result.cutoff!=null?'cutoff '+result.cutoff+' · ':''}${result.notch_centers?.length?'notches '+result.notch_centers.join(', ')+' (width '+result.notch_width+') · ':''}${result.removed_bins} FFT bins removed`:null,sg?`SG window ${result.window}, order ${result.order}`:null].filter(Boolean).join(' → ')+'. Raw absorbance is retained in gray; final output is black.';
   }catch(e){if(revision===roiSpectra.sgRevision)$('#roi-sg-status').textContent=e.message+' Showing raw absorbance.';}
@@ -954,6 +990,7 @@ function restoreReproducedState(d){
     $('#session-status').textContent='Saved settings loaded';$('#discovery-count').textContent=`${d.discovery.files} external raw images`;
     unlock(3);go(3);notify('Saved settings loaded for new data. Confirm normalization, select new spatial ROIs and review analyte-free reference bands before processing.');return;
   }
+  if(d.spectrum)restoreSpectrumProject(d.spectrum).catch(e=>notify('Full spectrum display: '+e.message,true));
   $('#session-status').textContent='Reproduced project';unlock(d.cnr.length?10:8);go(d.cnr.length?10:8);
   notify(d.report?labels[d.report.status]+'. Saved selections were reused and numerical processing was rerun.':'Processed dataset restored.',d.report?.status==='mismatch');
 }

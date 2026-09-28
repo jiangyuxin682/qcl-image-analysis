@@ -249,6 +249,7 @@ class ProcessingState:
         self._uploaded_inputs = None
         self._reproduction_inputs = None
         self.import_name = None
+        self.spectrum_project = None
         self.dataset = None
         self.path = None
         self.version = 0
@@ -323,6 +324,7 @@ class ProcessingState:
 
     def discover(self, payload):
         path, dataset = discover_files(payload["path"])
+        self.spectrum_project = None
         self.reset_analysis()
         self.path, self.dataset = path, dataset
         self.stage = "discovered"
@@ -366,6 +368,10 @@ class ProcessingState:
             points.append({"wavenumber": int(row.wavenumber), "raw_signal": float(array[y, x])})
         return {**common, "x": x, "y": y, "points": points,
                 "missing_wavenumbers": sorted(set(int(v) for v in self.dataset.wavenumber) - set(int(v) for v in rows.wavenumber))}
+
+    def save_spectrum(self, payload):
+        from ui.spectrum_project import save_spectrum
+        return save_spectrum(self, payload)
 
     def raw_roi_spectrum(self, payload):
         """Average two full-image ROIs across all measured bands of a pattern."""
@@ -1478,9 +1484,8 @@ class ProcessingState:
                 "r0": self.r0_records, "cnr": self.cnr_records, "cnr_rois": self.cnr_rois,
                 "parameters": self.parameters, "n_pixels": self.n_pixels, "qc_settings": self.qc_settings,
                 "drift": self.drift, "on_rois": {p: asdict(r) for p, r in self.on_rois.items()},
-                "report": self.reproduction_report,
-                "discovery": {"wavenumbers": self.bands, "files": len(self.raw),
-                              "availability": [{"pattern": p, "wavenumbers": self.bands} for p in self.patterns]}}
+                "report": self.reproduction_report, "spectrum": self.spectrum_project,
+                "discovery": self.discovery_state()}
 
     def export(self, options=None):
         self.require("complete")
@@ -1840,6 +1845,7 @@ class Handler(BaseHTTPRequestHandler):
                 "/api/discover": session.discover,
                 "/api/raw-inspection": session.raw_inspection,
                 "/api/raw-roi-spectrum": session.raw_roi_spectrum,
+                "/api/save-spectrum": session.save_spectrum,
                 "/api/roi-spectrum-sg": session.smooth_roi_spectrum,
                 "/api/roi-spectrum-filter": session.filter_roi_spectrum,
                 "/api/configure": session.configure,

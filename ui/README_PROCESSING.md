@@ -387,7 +387,8 @@ Result CSVs use the descriptive filenames listed below. Metadata remains
 compatible, and older project filenames are accepted on import. The ZIP also includes:
 
 - `inputs/*.npy` (optional): full, uncropped raw images as lossless float64 arrays. They
-  cover selected patterns and involved bands only. These are the actual loaded
+  cover selected processing patterns/bands, plus every measured band of the saved
+  Section 1 spectrum when **Include all measured raw bands** is selected. These are the actual loaded
   numerical inputs, not a later reread of original files or their CSV formatting.
 - `recipe.json`: complete effective parameters, spectral configuration, committed
   crop positions and reference selections, QC and CNR configuration.
@@ -430,7 +431,7 @@ downloaded. Before exporting, recompute any edited processing/CNR settings.
 The standalone importer accepts one project ZIP. The multi-folder workspace
 accepts one or more project ZIPs and the complete multi-dataset export ZIP;
 its contained projects are reproduced into separate tabs. Dataset names are
-retained from multi-dataset bundles. Sharing switches, Section 1 spectra, line
+retained from multi-dataset bundles. Sharing switches, line
 plots, video settings and per-image display preferences are not restored. Previously
 exported result-only ZIPs without a manifest cannot be replayed; re-export from
 a processed session using this version. Uploads are limited to 1 GiB compressed
@@ -672,3 +673,33 @@ and **Open Section** buttons. Sharing is workspace-wide, so the table marks it O
 for all folders rather than implying independent per-tab switches. Incomplete
 processing/CNR is reported alongside parameter conflicts. Disabled sharing groups
 are excluded from the comparison gate and its diagnostics.
+
+
+## Include the Section 1 full spectrum in Section 10
+
+The **Section 1 · Full spectrum** selector is independent of stage-image CSVs:
+
+- **Parameters and verification results** (lightweight preset): saves the last
+  successfully calculated spectrum's pattern, all measured wavenumbers, full-image
+  analyte/background rectangles, Fourier/SG settings, display/marker settings,
+  input fingerprints and original numerical results. Reproduction requires the
+  original full set of spectral CSVs unless those inputs are already in the ZIP.
+- **Include all measured raw bands** (complete preset): additionally includes the
+  full raw images needed for that spectrum, including bands and patterns not used
+  by Sections 2–8. Shared input arrays are stored only once.
+- **Do not include full spectrum**: exports processing without the spectrum.
+
+Calculate the Section 1 spectrum first. Valid filter changes are saved automatically;
+ROI edits require **Calculate spectra** again. The ZIP contains the last successful
+spectrum, not uncalculated edits. If no spectrum has been calculated, none is added.
+Only one spectrum snapshot per dataset is saved. Its numerical table is also
+available as `spectrum/full_spectrum.csv` inside the ZIP. A failed filter calculation keeps
+the previous valid snapshot; recalculate valid settings before exporting.
+
+Import with the existing Section 1 project importer. For a parameters-only project,
+choose **Choose local raw data folder** or **Choose raw CSV files** as its source;
+provide every measured band, not only processing centers/references. Missing or
+changed spectrum inputs fail import without replacing the current session.
+Reproduction recomputes ROI means, absorbance and enabled spectral filters, adds
+these checks to the verification report, and restores Section 1's ROI plots and
+controls. Applying processing settings to new data does not reuse the saved spectrum.

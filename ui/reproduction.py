@@ -41,12 +41,14 @@ AUXILIARY = ('linear_baseline', 'fourier_mask', 'background', 'gain', 'flat_vali
 def export_options(value=None):
     # Keep the programmatic legacy default; browser exports explicitly select a preset.
     if value is None:
-        return {'raw_inputs': True, 'stages': list(STAGES), 'auxiliary': True, 'tables': True}
+        return {'raw_inputs': True, 'stages': list(STAGES), 'auxiliary': True, 'tables': True, 'spectrum': 'raw'}
     if not isinstance(value, dict):
         raise ValueError('Invalid export options.')
-    result = {'raw_inputs': False, 'stages': [], 'auxiliary': False, 'tables': True, **value}
-    if set(result) != {'raw_inputs', 'stages', 'auxiliary', 'tables'} or any(not isinstance(result[k], bool) for k in ('raw_inputs', 'auxiliary', 'tables')):
+    result = {'raw_inputs': False, 'stages': [], 'auxiliary': False, 'tables': True, 'spectrum': 'none', **value}
+    if set(result) != {'raw_inputs', 'stages', 'auxiliary', 'tables', 'spectrum'} or any(not isinstance(result[k], bool) for k in ('raw_inputs', 'auxiliary', 'tables')):
         raise ValueError('Invalid export options.')
+    if result['spectrum'] not in ('none', 'parameters', 'raw'):
+        raise ValueError('Choose a valid full spectrum export mode.')
     if not isinstance(result['stages'], list) or any(stage not in STAGES for stage in result['stages']):
         raise ValueError('Unknown export stage.')
     return result
@@ -111,7 +113,7 @@ def environment():
         except importlib.metadata.PackageNotFoundError:
             versions[name] = None
     files = [*sorted((root / 'src/qcl_analysis').glob('*.py')),
-             root / 'ui/app_processing.py', root / 'ui/reproduction.py']
+             root / 'ui/app_processing.py', root / 'ui/reproduction.py', root / 'ui/spectrum_project.py']
     fingerprints = {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest()
                     for p in files if p.is_file()}
     git = {'commit': None, 'dirty': None}
@@ -142,11 +144,13 @@ def write_project(archive, state, metadata, clean_json, options=None):
                        'source_path': str(row.path), 'frame': int(row.frame),
                        'created_timestamp': float(row.created_timestamp),
                        'timestamp_source': row.timestamp_source})
-    recipe = {'format': FORMAT, 'version': VERSION,
+    from ui.spectrum_project import write_spectrum
+    spectrum = write_spectrum(archive, state, options['spectrum'], inputs)
+    recipe = {'spectrum': spectrum, 'format': FORMAT, 'version': VERSION,
               'selection_policy': 'reuse_committed_pixel_coordinates_and_crop_positions',
               'inputs': inputs, 'configuration': metadata, 'export_options': options,
               'processing': resolved_parameters(state.parameters),
-              'scope': 'Sections 2–8 numerical processing; view, spectrum and video state excluded'}
+              'scope': 'Sections 2–8 and optional Section 1 full spectrum; videos and line profiles excluded'}
     archive.writestr('recipe.json', json.dumps(clean_json(recipe), indent=2, allow_nan=False))
     verification = {'arrays': {f'{key[0]}/{key[1]}cm-1/{result_filename(stage)}': array_fingerprint(array)
                                for key in state.crops for stage, array in result_arrays(state, key).items() if array is not None},
@@ -158,7 +162,8 @@ def write_project(archive, state, metadata, clean_json, options=None):
     archive.writestr('REPRODUCE.txt', 'Open QCL Processing Workbench, choose Import processing ZIP in Section 1, then Reproduce.\n' +
                      ('Raw arrays are included losslessly.\n' if options['raw_inputs'] else 'Raw arrays are NOT included. Select matching original raw data to reproduce.\n') +
                      'Selected result CSVs are optional; fingerprints cover omitted arrays.\n'
-                     'This project restores numerical Sections 2–8 only, not videos, line plots or multi-folder workspace settings.\n')
+                     'Section 1 full spectrum is included when selected and saved; parameters-only spectra require original source data.\n'
+                     'Videos, line plots and multi-folder workspace settings are not restored.\n')
     inventory = {name: {'size': archive.getinfo(name).file_size,
                         'sha256': hashlib.sha256(archive.read(name)).hexdigest()}
                  for name in archive.namelist()}
@@ -426,6 +431,9 @@ def reproduce(data, progress=lambda **values: None, *, external=None, mode="repr
             qc_columns = [c for c in expected_qc if c not in {'path'}]
             checks += compare_records('QC', json.loads(state.qc[qc_columns].to_json(orient='records', double_precision=15)),
                                       json.loads(expected_qc[qc_columns].to_json(orient='records', double_precision=15)))
+        if recipe.get('spectrum'):
+            from ui.spectrum_project import restore_spectrum
+            checks += restore_spectrum(state, recipe['spectrum'], archive, work, external)
         summary = {status: sum(c['status'] == status for c in checks)
                    for status in ('exact', 'within_tolerance', 'mismatch', 'unverified')}
         report = {'status': 'mismatch' if summary['mismatch'] else 'unverified' if summary['unverified'] else 'within_tolerance' if summary['within_tolerance'] else 'exact',

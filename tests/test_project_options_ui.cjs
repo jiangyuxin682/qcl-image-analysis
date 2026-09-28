@@ -31,12 +31,12 @@ test('apply mode requires external inputs; CSV staging is cleaned on project err
 test('export presets default to lightweight and custom selections select only requested stages',()=>{
   const c={document:{createElement:tag=>({tag,dataset:{},checked:false,children:[],append(...items){this.children.push(...items);}}),createTextNode:text=>({text})}};
   vm.createContext(c);vm.runInContext(fs.readFileSync('ui/static_processing/project_options.js','utf8'),c);
-  const preset={value:'light'},hint={},stages={children:[],append(node){this.children.push(node);}},flags={raw_inputs:{checked:false,dataset:{export:'raw_inputs'}},auxiliary:{checked:false,dataset:{export:'auxiliary'}},tables:{checked:true,dataset:{export:'tables'}}};
+  const spectrum={value:'parameters'},preset={value:'light'},hint={},stages={children:[],append(node){this.children.push(node);}},flags={raw_inputs:{checked:false,dataset:{export:'raw_inputs'}},auxiliary:{checked:false,dataset:{export:'auxiliary'}},tables:{checked:true,dataset:{export:'tables'}}};
   const inputs=()=>stages.children.map(n=>n.children[0]);
-  const root={querySelector:s=>s==='.project-preset'?preset:s==='.project-stages'?stages:s==='.project-export-hint'?hint:flags[/data-export="([^"]+)"/.exec(s)[1]],querySelectorAll:s=>s==='[data-stage]:checked'?inputs().filter(n=>n.checked):[...Object.values(flags),...inputs()]};
+  const root={querySelector:s=>s==='.project-spectrum'?spectrum:s==='.project-preset'?preset:s==='.project-stages'?stages:s==='.project-export-hint'?hint:flags[/data-export="([^"]+)"/.exec(s)[1]],querySelectorAll:s=>s==='[data-stage]:checked'?inputs().filter(n=>n.checked):[...Object.values(flags),...inputs()]};
   let updates=0;const controller=c.QCLProject.exportControls(root,()=>updates++);
-  assert.equal(controller.options().raw_inputs,false);assert.equal(controller.options().tables,true);assert.equal(controller.options().stages.length,0);
-  preset.value='full';preset.onchange({target:preset});assert.equal(controller.options().stages.length,6);assert.equal(controller.options().raw_inputs,true);
+  assert.equal(controller.options().spectrum,'parameters');assert.equal(controller.options().raw_inputs,false);assert.equal(controller.options().tables,true);assert.equal(controller.options().stages.length,0);
+  preset.value='full';preset.onchange({target:preset});assert.equal(controller.options().spectrum,'raw');assert.equal(controller.options().stages.length,6);assert.equal(controller.options().raw_inputs,true);
   preset.value='light';preset.onchange({target:preset});inputs().find(n=>n.dataset.stage==='baseline').checked=true;inputs()[0].onchange();
   assert.equal(preset.value,'custom');assert.deepEqual([...controller.options().stages],['baseline']);assert.equal(controller.options().raw_inputs,false);assert.equal(updates,3);
   assert.match(hint.textContent,/NOT included/);

@@ -198,3 +198,15 @@ Import multi-dataset ZIPs through the workspace. When folders require different 
 - Confirm the ZIP download completed, matching raw data is retained for lightweight projects, and needed PNG/MP4 files are saved separately.
 
 For setup or launch errors, see the [installation guide](INSTALLATION.md). For algorithms and exported-file details, see the [Processing reference](README_PROCESSING.md).
+
+
+### Include the full spectrum in the final ZIP
+
+In Section 10, use **Section 1 · Full spectrum** to include its parameters and
+verification results, include all measured raw bands, or omit it. The lightweight
+preset saves parameters; the complete preset includes the raw spectrum inputs.
+Calculate Section 1 first: export keeps the last successfully calculated spectrum
+and valid filter settings for each dataset. Uncalculated ROI edits are not saved.
+For parameters-only reproduction, select the original folder or all measured
+spectral CSVs in the project import controls. The importer checks input identities,
+recomputes the spectrum, and restores its two ROIs and Fourier/SG settings.
