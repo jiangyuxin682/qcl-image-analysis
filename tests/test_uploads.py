@@ -203,7 +203,7 @@ def test_file_backed_zip_reproduction(acquisition, tmp_path):
         restored._reproduction_inputs.cleanup()
 
 
-@pytest.mark.parametrize('platform', ['darwin', 'win32', 'linux'])
+@pytest.mark.parametrize('platform', ['darwin', 'linux'])
 def test_system_folder_chooser_cancel_unicode_and_failure(monkeypatch, platform):
     import subprocess
     import sys
@@ -290,3 +290,56 @@ def test_lightweight_comparison_bundle_reproduces_using_external_inputs(acquisit
     assert len(result['datasets']) == 2
     assert [d['name'] for d in result['datasets']] == ['First', 'Second']
     assert all(imported.get(d['id']).reproduction_report['status'] == 'exact' for d in result['datasets'])
+
+
+@pytest.mark.parametrize('selected', ['', 'C:/Users/Test/data', "C:/\u7814\u7a76 data/O'Brien/[3] $sample"])
+def test_windows_folder_selection_ignores_shell_diagnostics(monkeypatch, selected):
+    import subprocess
+    import sys
+    from pathlib import Path
+    from types import SimpleNamespace
+    from ui.uploads import choose_local_folder
+
+    monkeypatch.setattr(sys, 'platform', 'win32')
+    outputs = []
+    def run(command, **kwargs):
+        assert command[:4] == ['powershell.exe', '-NoProfile', '-STA', '-Command']
+        assert kwargs['timeout'] == 300 and kwargs['check']
+        assert kwargs['stdout'] == subprocess.DEVNULL
+        path = Path(kwargs['env']['QCL_FOLDER_PICKER_RESULT'])
+        assert str(path) not in command[-1]
+        outputs.append(path)
+        path.write_text(json.dumps({'path': selected}), encoding='utf-8-sig')
+        return SimpleNamespace(stdout=b'FCl started\nERROR - Unable to get icon for location\n',
+                               stderr=b'Classification icon creation failed')
+    monkeypatch.setattr(subprocess, 'run', run)
+    assert choose_local_folder() == selected
+    assert not outputs[0].parent.exists()
+
+
+@pytest.mark.parametrize('failure', ['missing', 'invalid_json', 'invalid_type', 'multiline', 'timeout', 'exit'])
+def test_windows_folder_selection_failure_is_not_a_directory(monkeypatch, failure):
+    import subprocess
+    import sys
+    from pathlib import Path
+    from types import SimpleNamespace
+    from ui.uploads import choose_local_folder
+
+    monkeypatch.setattr(sys, 'platform', 'win32')
+    outputs = []
+    def run(command, **kwargs):
+        path = Path(kwargs['env']['QCL_FOLDER_PICKER_RESULT'])
+        outputs.append(path)
+        if failure == 'timeout':
+            raise subprocess.TimeoutExpired(command, 300)
+        if failure == 'exit':
+            raise subprocess.CalledProcessError(1, command)
+        contents = {'invalid_json': 'shell logs', 'invalid_type': '{"path": 42}',
+                    'multiline': json.dumps({'path': 'logs\nC:/data'})}
+        if failure in contents:
+            path.write_text(contents[failure], encoding='utf-8')
+        return SimpleNamespace(stdout=b'ERROR logs C:/data')
+    monkeypatch.setattr(subprocess, 'run', run)
+    with pytest.raises(ValueError, match='system folder chooser'):
+        choose_local_folder()
+    assert not outputs[0].parent.exists()

@@ -174,13 +174,7 @@ def choose_local_folder():
         command = ['osascript', '-e', 'try\nPOSIX path of (choose folder with prompt "Choose QCL data folder")\non error number -128\nreturn ""\nend try']
         encoding = 'utf-8'
     elif sys.platform == 'win32':
-        script = ("[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
-                  "Add-Type -AssemblyName System.Windows.Forms; "
-                  "$picker = New-Object System.Windows.Forms.FolderBrowserDialog; "
-                  "$picker.Description = 'Choose QCL data folder'; "
-                  "if ($picker.ShowDialog() -eq 'OK') { [Console]::Write($picker.SelectedPath) }; $picker.Dispose()")
-        command = ['powershell.exe', '-NoProfile', '-STA', '-Command', script]
-        encoding = 'utf-8-sig'
+        return _choose_windows_folder()
     else:
         command = [sys.executable, '-c', 'import tkinter as t; from tkinter import filedialog; r=t.Tk(); r.withdraw(); print(filedialog.askdirectory(title="Choose QCL data folder")); r.destroy()']
         encoding = 'utf-8'
@@ -189,3 +183,50 @@ def choose_local_folder():
     except (OSError, subprocess.SubprocessError) as exc:
         raise ValueError('Could not open the system folder chooser. Run the app on a local desktop, or use Spectral CSV files.') from exc
     return result.stdout.decode(encoding).strip()
+
+
+def _choose_windows_folder():
+    """Keep shell-extension console diagnostics out of the selected path."""
+    import os
+    import subprocess
+
+    script = (
+        "$ErrorActionPreference = 'Stop'; "
+        "try { "
+        "Add-Type -AssemblyName System.Windows.Forms; "
+        "$picker = New-Object System.Windows.Forms.FolderBrowserDialog; "
+        "try { "
+        "$picker.Description = 'Choose QCL data folder'; "
+        "$selected = ''; "
+        "if ($picker.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) "
+        "{ $selected = $picker.SelectedPath }; "
+        "$result = @{path = $selected} | ConvertTo-Json -Compress; "
+        "[System.IO.File]::WriteAllText($env:QCL_FOLDER_PICKER_RESULT, $result, "
+        "[System.Text.Encoding]::UTF8) "
+        "} finally { $picker.Dispose() } "
+        "} catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }"
+    )
+    try:
+        with tempfile.TemporaryDirectory(prefix='qcl-folder-picker-') as work:
+            result_path = Path(work) / 'selection.json'
+            env = os.environ.copy()
+            env['QCL_FOLDER_PICKER_RESULT'] = str(result_path)
+            # Paths travel through the environment, never PowerShell source.
+            # Native shell extensions may emit arbitrary stdout/stderr noise.
+            subprocess.run(
+                ['powershell.exe', '-NoProfile', '-STA', '-Command', script],
+                env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=300, check=True,
+            )
+            selection = json.loads(result_path.read_text(encoding='utf-8-sig'))
+            if not isinstance(selection, dict) or not isinstance(selection.get('path'), str):
+                raise ValueError('Invalid folder selection result.')
+            path = selection['path']
+            if any(character in path for character in ('\x00', '\r', '\n')):
+                raise ValueError('Invalid folder selection path.')
+            return path
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        raise ValueError(
+            'Could not open the system folder chooser. Run the app on a local '
+            'desktop, or use Spectral CSV files.'
+        ) from exc
