@@ -40,7 +40,9 @@ macOS:
 
 Open **http://127.0.0.1:8766** if the browser does not open automatically.
 Keep the terminal running. Export before pressing Ctrl+C to stop the app;
-sessions are not saved automatically. Subsequent sessions require only the
+sessions are not saved automatically. Closing the last UI tab normally stops the
+CLI server after 10 seconds. Ctrl+C also stops it; automatic tab closure depends
+on browser permissions, with a stopped-server message as fallback. Subsequent sessions require only the
 launch command. A processing project ZIP is an analysis archive, not an installer.
 
 ## Current processing workflow

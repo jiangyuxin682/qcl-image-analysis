@@ -102,7 +102,7 @@ def test_changed_reference_results_report_mismatch(acquisition):
     state = complete(acquisition)
     package = state.export()
     with zipfile.ZipFile(io.BytesIO(package)) as archive:
-        name = 'pattern0/1658cm-1/Abs_uncorrected.csv'
+        name = 'pattern0/1658cm-1/[5]_Abs_uncorrected.csv'
         array = np.loadtxt(io.BytesIO(archive.read(name)), delimiter=',')
     array[0, 0] += .01
     output = io.StringIO()
@@ -174,14 +174,14 @@ def test_raw_array_header_validated_before_allocation():
 
 
 def test_previous_result_names_remain_reproducible(acquisition):
-    from ui.reproduction import RESULT_FILENAMES
+    from ui.reproduction import RESULT_FILENAMES, result_filename
     original = complete(acquisition)
     with zipfile.ZipFile(io.BytesIO(original.export())) as archive:
         files = {}
         for name in archive.namelist():
             old_name = name
             for stage, filename in RESULT_FILENAMES.items():
-                if name.endswith('/' + filename + '.csv'):
+                if name.endswith('/' + result_filename(stage)):
                     old_name = name.rsplit('/', 1)[0] + '/' + stage + '.csv'
                     break
             files[old_name] = archive.read(name)
@@ -344,3 +344,28 @@ def test_version_one_project_remains_importable(acquisition):
         for name, data in files.items():archive.writestr(name, data)
     _, report = reproduce(output.getvalue())
     assert report['status'] in {'exact', 'within_tolerance'}
+
+
+@pytest.mark.parametrize('lightweight', [False, True])
+def test_unnumbered_v2_projects_still_reproduce(acquisition, lightweight):
+    import re
+    state = complete(acquisition)
+    options = {'raw_inputs': True, 'stages': [], 'auxiliary': False} if lightweight else None
+    with zipfile.ZipFile(io.BytesIO(state.export(options))) as archive:
+        files = {re.sub(r'/\[\d+\]_', '/', name): archive.read(name)
+                 for name in archive.namelist()}
+    verification = json.loads(files['verification.json'])
+    verification['arrays'] = {re.sub(r'/\[\d+\]_', '/', key): value
+                              for key, value in verification['arrays'].items()}
+    files['verification.json'] = json.dumps(verification).encode()
+    manifest = json.loads(files['manifest.json'])
+    manifest['files'] = {name: {'size': len(data), 'sha256': hashlib.sha256(data).hexdigest()}
+                         for name, data in files.items() if name != 'manifest.json'}
+    files['manifest.json'] = json.dumps(manifest).encode()
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, 'w') as archive:
+        for name, data in files.items():
+            archive.writestr(name, data)
+    restored, report = reproduce(output.getvalue())
+    assert report['status'] in {'exact', 'within_tolerance'}
+    restored._reproduction_inputs.cleanup()

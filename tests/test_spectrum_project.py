@@ -32,7 +32,7 @@ def test_full_spectrum_includes_unused_band_and_deduplicates(acquisition):
     package = state.export()
     with zipfile.ZipFile(io.BytesIO(package)) as archive:
         recipe = json.loads(archive.read('recipe.json'))
-        assert 'spectrum/full_spectrum.csv' in archive.namelist()
+        assert 'spectrum/[1]_full_spectrum.csv' in archive.namelist()
         spectrum = recipe['spectrum']
         assert [i['wavenumber'] for i in spectrum['inputs']] == [1080, 1601, 1658, 1702]
         assert len([n for n in archive.namelist() if n.endswith('.npy')]) == 7

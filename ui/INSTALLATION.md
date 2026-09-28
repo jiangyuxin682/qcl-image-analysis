@@ -196,7 +196,7 @@ For later sessions, open the same project in VS Code, open its terminal, and run
 
 Use the explicit `.venv` interpreter path. A bare `python ui/app_processing.py` may use another environment and fail with `ModuleNotFoundError`.
 
-After exporting, press **Ctrl+C** in the running terminal on either system to stop the server. Closing only the browser does not stop it.
+After exporting, press **Ctrl+C** in the running terminal on either system to stop the server. Closing the last Processing UI tab normally stops the CLI server after a 10-second grace period. Refreshing or switching between the single-dataset and comparison pages during that period keeps it running. Other open UI tabs keep the server alive. Ctrl+C stops the server; the UI attempts to close its tab and shows a stopped-server message if the browser blocks automatic closure. If the browser crashes or cannot deliver its close notification, use Ctrl+C manually.
 
 ## 8. Install FFmpeg only for MP4 export
 

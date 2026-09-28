@@ -129,7 +129,7 @@ Enter a ZIP filename and open the export-content options. **Required reproductio
 | Complete reproducible project | Raw input arrays and all optional outputs, suitable for archiving without the original input directory; potentially large |
 | Custom export | Select raw arrays, stage CSVs, auxiliary arrays, and tables; required items cannot be deselected |
 
-Stage CSVs contain numeric matrices. Download PNGs using the corresponding image button. Line profiles, videos, and complete display state are not automatically restored from the project.
+Stage CSV names start with `[1]_` through `[6]_` in processing order (raw, reflectance, Fourier, flat-field, absorbance, baseline). Auxiliary files share their stage number; skipped stages leave gaps. The combined spectrum table is `spectrum/[1]_full_spectrum.csv`. Stage CSVs contain numeric matrices. Download PNGs using the corresponding image button. Line profiles, videos, and complete display state are not automatically restored from the project.
 
 **Keep matching original data with a lightweight ZIP: the ZIP alone is insufficient for later recalculation.** Projects containing raw inputs can reproduce selected patterns/bands using those embedded inputs. Retain raw data, the project ZIP, software version, and any needed PNG/MP4 files. Confirm downloads finish before exiting.
 
@@ -210,3 +210,5 @@ and valid filter settings for each dataset. Uncalculated ROI edits are not saved
 For parameters-only reproduction, select the original folder or all measured
 spectral CSVs in the project import controls. The importer checks input identities,
 recomputes the spectrum, and restores its two ROIs and Fourier/SG settings.
+
+Export before closing the UI. Closing the last tab normally stops the CLI server after 10 seconds. Ctrl+C stops the server and the page attempts to close; if the browser blocks closure, it displays a stopped-server message.

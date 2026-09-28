@@ -26,8 +26,32 @@ RESULT_FILENAMES = {
 }
 
 
+RESULT_ORDER = {
+    'raw': 1, 'reflectance': 2, 'gold_reference_pixels': 2,
+    'fourier': 3, 'fourier_mask': 3,
+    'rolling': 4, 'background': 4, 'gain': 4, 'flat_valid_mask': 4,
+    'absorbance': 5, 'cell_free_pixels': 5, 'cell_free_pixel_mask': 5,
+    'baseline': 6, 'linear_baseline': 6, 'baseline_valid_mask': 6,
+}
+
+
 def result_filename(stage):
-    return RESULT_FILENAMES.get(stage, stage) + '.csv'
+    return f"[{RESULT_ORDER[stage]}]_" + RESULT_FILENAMES.get(stage, stage) + '.csv'
+
+
+def result_candidates(folder, stage):
+    """Accept numbered exports and both historical filename conventions."""
+    return [f'{folder}/{result_filename(stage)}',
+            f"{folder}/{RESULT_FILENAMES.get(stage, stage)}.csv",
+            f'{folder}/{stage}.csv']
+
+
+def archived_result(archive, folder, stage):
+    name = next((name for name in result_candidates(folder, stage)
+                 if name in archive.namelist()), None)
+    if name is None:
+        raise ValueError(f'Missing saved selection: {folder}/{stage}')
+    return name
 
 MAX_UPLOAD = 1024**3
 MAX_EXPANDED = 4 * 1024**3
@@ -369,9 +393,9 @@ def reproduce(data, progress=lambda **values: None, *, external=None, mode="repr
         for key in state.raw:
             folder = f'{key[0]}/{key[1]}cm-1'
             if meta['has_gold_patch_reference']:
-                gold[key] = np.loadtxt(io.BytesIO(archive.read(f'{folder}/gold_reference_pixels.csv')),
+                gold[key] = np.loadtxt(io.BytesIO(archive.read(archived_result(archive, folder, 'gold_reference_pixels'))),
                                        delimiter=',', skiprows=1, ndmin=2)
-            cell[key] = np.loadtxt(io.BytesIO(archive.read(f'{folder}/cell_free_pixels.csv')),
+            cell[key] = np.loadtxt(io.BytesIO(archive.read(archived_result(archive, folder, 'cell_free_pixels'))),
                                    delimiter=',', skiprows=1, ndmin=2)
         qc = meta['qc_settings']
         state.normalize({'has_gold': meta['has_gold_patch_reference'], 'n_pixels': meta['n_reference_pixels'],
@@ -406,15 +430,17 @@ def reproduce(data, progress=lambda **values: None, *, external=None, mode="repr
             for stage, array in arrays.items():
                 if array is None:
                     continue
-                name = f'{folder}/{result_filename(stage)}'
-                if name not in archive.namelist() and verification is not None:
+                candidates = result_candidates(folder, stage)
+                name = next((n for n in candidates if n in archive.namelist()), None)
+                if name is None and verification is not None:
+                    name = next((n for n in candidates if n in verification['arrays']), candidates[0])
                     expected = verification['arrays'][name]
                     matches = array_fingerprint(array) == expected
                     checks.append({'item': name, 'status': 'exact' if matches else 'unverified',
                                    'reason': 'Exact array fingerprint; CSV omitted' if matches else 'Fingerprint differs; omitted array prevents numerical tolerance comparison'})
                     continue
-                if name not in archive.namelist():
-                    name = f'{folder}/{stage}.csv'  # Earlier project exports.
+                if name is None:
+                    raise ValueError(f'Missing result array: {candidates[0]}')
                 expected = np.loadtxt(io.BytesIO(archive.read(name)), delimiter=',', ndmin=2)
                 checks.append(compare_array(name, array, expected))
         checks += compare_records('CNR', clean_json(state.cnr_records), cnr)

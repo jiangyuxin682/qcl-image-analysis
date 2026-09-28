@@ -1548,7 +1548,7 @@ class ProcessingState:
                 if self.has_gold:
                     gold_coordinates = io.StringIO()
                     np.savetxt(gold_coordinates, self.gold_pixels[key], fmt="%d", delimiter=",", header="y_full_raw,x_full_raw", comments="")
-                    z.writestr(f"{folder}/gold_reference_pixels.csv", gold_coordinates.getvalue())
+                    z.writestr(f"{folder}/{result_filename('gold_reference_pixels')}", gold_coordinates.getvalue())
                 arrays.update(
                     {
                         "fourier_mask": self.ff[key].mask,
@@ -1571,7 +1571,7 @@ class ProcessingState:
                     header="y,x",
                     comments="",
                 )
-                z.writestr(f"{folder}/cell_free_pixels.csv", coordinates.getvalue())
+                z.writestr(f"{folder}/{result_filename('cell_free_pixels')}", coordinates.getvalue())
                 if key in self.baselines:
                     arrays["linear_baseline"] = self.baselines[key].baseline
                     arrays["baseline_valid_mask"] = self.baselines[
@@ -1714,6 +1714,7 @@ class Handler(BaseHTTPRequestHandler):
         url = urlparse(self.path)
         assets = {
             "/": ("index.html", "text/html; charset=utf-8"),
+            "/lifecycle.js": ("lifecycle.js", "text/javascript; charset=utf-8"),
             "/app.js": ("app.js", "text/javascript; charset=utf-8"),
             "/styles.css": ("styles.css", "text/css; charset=utf-8"),
             "/compare": ("compare.html", "text/html; charset=utf-8"),
@@ -1817,6 +1818,12 @@ class Handler(BaseHTTPRequestHandler):
             if not 0 < length <= 1_000_000:
                 raise ValueError("Invalid request size.")
             payload = json.loads(self.rfile.read(length))
+            if url.path == "/api/browser-session":
+                lifecycle = getattr(self.server, 'browser_lifecycle', None)
+                if lifecycle:
+                    lifecycle.update(payload.get('client'), payload.get('leaving') is True)
+                return self.json({'enabled': lifecycle is not None,
+                                  'stopping': bool(lifecycle and lifecycle.stopping)})
             url = urlparse(self.path)
             if url.path == "/api/choose-folder":
                 return self.json({"path": choose_local_folder()})
@@ -1876,8 +1883,11 @@ def main():
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args()
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    from ui.browser_lifecycle import BrowserLifecycle
+    server.browser_lifecycle = BrowserLifecycle(server.shutdown)
     url = f"http://127.0.0.1:{args.port}"
     print(f"QCL processing workbench: {url}", flush=True)
+    print("Export before closing. Closing the last UI tab stops the server after 10 seconds.", flush=True)
     if not args.no_browser:
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()
     try:
@@ -1885,6 +1895,7 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        server.browser_lifecycle.close()
         server.server_close()
 
 

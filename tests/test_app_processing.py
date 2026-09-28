@@ -424,18 +424,18 @@ def test_complete_pipeline_and_export(acquisition):
         assert metadata["processed_wavenumbers"] == [1601, 1658, 1702]
         assert "cnr_summary.csv" in z.namelist()
         saved = np.loadtxt(
-            io.StringIO(z.read("pattern0/1658cm-1/Abs_baseline_corrected.csv").decode()),
+            io.StringIO(z.read("pattern0/1658cm-1/[6]_Abs_baseline_corrected.csv").decode()),
             delimiter=",",
         )
         np.testing.assert_allclose(saved, expected, atol=1e-14)
         mask = np.loadtxt(
             io.StringIO(
-                z.read("pattern0/1658cm-1/cell_free_pixel_mask.csv").decode()
+                z.read("pattern0/1658cm-1/[5]_cell_free_pixel_mask.csv").decode()
             ),
             delimiter=",",
         )
         assert mask.sum() == 9
-        coordinates = z.read("pattern0/1658cm-1/cell_free_pixels.csv").decode()
+        coordinates = z.read("pattern0/1658cm-1/[5]_cell_free_pixels.csv").decode()
         assert coordinates.startswith("y,x\n")
     state.crop({"roi": {"x_min": 1, "x_max": 10, "y_min": 1, "y_max": 10}})
     assert state.stage == "cropped"
@@ -499,7 +499,7 @@ def test_per_image_extreme_pixels_drive_r0_preview_and_export(acquisition, metho
         }
         mask = np.loadtxt(
             io.StringIO(
-                z.read("pattern1/1702cm-1/cell_free_pixel_mask.csv").decode()
+                z.read("pattern1/1702cm-1/[5]_cell_free_pixel_mask.csv").decode()
             ),
             delimiter=",",
         )

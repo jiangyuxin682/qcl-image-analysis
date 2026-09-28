@@ -68,7 +68,7 @@ def write_spectrum(archive, state, mode, processing_inputs):
         values = (saved.get('filtered') or {}).get(field)
         if values is not None:
             table[field] = values
-    archive.writestr('spectrum/full_spectrum.csv', table.to_csv(index=False))
+    archive.writestr('spectrum/[1]_full_spectrum.csv', table.to_csv(index=False))
     return saved
 
 

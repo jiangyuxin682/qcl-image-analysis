@@ -543,18 +543,18 @@ Stage CSV filenames now describe their contents:
 
 | Previous name | Exported name |
 | --- | --- |
-| raw.csv | Intensity_raw.csv |
-| reflectance.csv | Reflectance_gold_normalized.csv |
-| fourier.csv | Signal_Fourier_filtered.csv |
-| rolling.csv | Signal_flat_field_corrected.csv |
-| absorbance.csv | Abs_uncorrected.csv |
-| baseline.csv | Abs_baseline_corrected.csv |
-| linear_baseline.csv | Abs_fitted_linear_baseline.csv |
-| background.csv | Rolling_ball_background.csv |
-| gain.csv | Flat_field_gain.csv |
+| raw.csv | [1]_Intensity_raw.csv |
+| reflectance.csv | [2]_Reflectance_gold_normalized.csv |
+| fourier.csv | [3]_Signal_Fourier_filtered.csv |
+| rolling.csv | [4]_Signal_flat_field_corrected.csv |
+| absorbance.csv | [5]_Abs_uncorrected.csv |
+| baseline.csv | [6]_Abs_baseline_corrected.csv |
+| linear_baseline.csv | [6]_Abs_fitted_linear_baseline.csv |
+| background.csv | [4]_Rolling_ball_background.csv |
+| gain.csv | [4]_Flat_field_gain.csv |
 
-Masks and reference coordinate filenames are unchanged. The importer accepts
-both these names and previous project ZIP names.
+Masks and reference coordinate files also receive their associated stage prefix.
+The importer accepts numbered names and both previous unnumbered conventions.
 
 
 ## Image pixel axes
@@ -693,7 +693,7 @@ Calculate the Section 1 spectrum first. Valid filter changes are saved automatic
 ROI edits require **Calculate spectra** again. The ZIP contains the last successful
 spectrum, not uncalculated edits. If no spectrum has been calculated, none is added.
 Only one spectrum snapshot per dataset is saved. Its numerical table is also
-available as `spectrum/full_spectrum.csv` inside the ZIP. A failed filter calculation keeps
+available as `spectrum/[1]_full_spectrum.csv` inside the ZIP. A failed filter calculation keeps
 the previous valid snapshot; recalculate valid settings before exporting.
 
 Import with the existing Section 1 project importer. For a parameters-only project,
@@ -703,3 +703,22 @@ changed spectrum inputs fail import without replacing the current session.
 Reproduction recomputes ROI means, absorbance and enabled spectral filters, adds
 these checks to the verification report, and restores Section 1's ROI plots and
 controls. Applying processing settings to new data does not reuse the saved spectrum.
+
+## Export order and browser lifecycle
+
+Per-pattern/wavenumber result CSVs use fixed processing-stage prefixes:
+`[1]_` raw, `[2]_` reflectance, `[3]_` Fourier, `[4]_` flat-field,
+`[5]_` absorbance, `[6]_` baseline. Auxiliary arrays and saved pixel coordinates
+use the number of their associated stage. Skipped stages leave numbering gaps.
+The combined spectrum table is `spectrum/[1]_full_spectrum.csv`; its columns
+retain the raw/Fourier/SG processing order. Older unnumbered project ZIPs
+remain importable, including lightweight fingerprint-only projects.
+
+The CLI server tracks top-level UI pages, not comparison iframes. Closing the
+last page normally stops the server after 10 seconds; reloads/navigation within
+that grace period keep the session. Background tabs are not timed out. Browser
+crashes or dropped close notifications require manual Ctrl+C. Export first.
+When Ctrl+C stops the server, open UI pages attempt `window.close()`. Browsers
+can block closing tabs that were not opened by script; those pages instead show
+a stopped-server message. This does not send keystrokes to VS Code or close
+its terminal. Internal desktop launchers retain their controller lifecycle.
