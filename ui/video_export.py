@@ -1,8 +1,8 @@
-"""Encode the displayed timelapse PNGs into an annotated constant-FPS MP4.
+"""Encode the displayed timelapse PNGs into an annotated MP4.
 
 Pillow lays out the title, original heatmap, selected color scale, and each
 frame's timestamp line. FFmpeg encodes one frame per image at the requested
-rate; temporary files are removed automatically. Numerical arrays are untouched.
+rate, extending frame holds across skipped patterns; temporary files are removed automatically. Numerical arrays are untouched.
 """
 import base64
 import io
@@ -31,8 +31,8 @@ def find_ffmpeg():
 
 
 def encode_video(video, fps, labels):
-    if not np.isfinite(fps) or not 1 <= fps <= 20:
-        raise ValueError("Playback FPS must be between 1 and 20.")
+    if not np.isfinite(fps) or not 0 < fps <= 20:
+        raise ValueError("Playback FPS must be above 0 and at most 20.")
     if len(labels) != len(video['frames']) or any(not isinstance(x, str) or len(x)>1000 for x in labels):
         raise ValueError("Expected one timestamp label per video frame.")
     executable = find_ffmpeg()
@@ -99,8 +99,15 @@ def encode_video(video, fps, labels):
             draw.text((x+iw/2, y+ih+38), 'X (pixel)', font=font, fill='#435b50', anchor='mt')
             draw.text((8, y-25), 'Y (pixel)', font=font, fill='#435b50')
             canvas.save(Path(folder)/f'{i:06d}.png')
+        # A skipped sampling position extends the preceding image's display time.
+        manifest = Path(folder) / 'frames.ffconcat'
+        entries = ['ffconcat version 1.0']
+        for i, frame in enumerate(video['frames']):
+            entries.extend([f"file '{i:06d}.png'", f"option framerate {fps:.12f}",
+                            f"duration {frame.get('hold_slots', 1) / fps:.9f}"])
+        manifest.write_text('\n'.join(entries) + '\n', encoding='ascii')
         output = Path(folder)/'timelapse.mp4'
-        result = subprocess.run([executable,'-y','-loglevel','error','-framerate',str(fps),'-i',str(Path(folder)/'%06d.png'),'-c:v','libx264','-pix_fmt','yuv420p','-movflags','+faststart',str(output)],capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0)
+        result = subprocess.run([executable,'-y','-loglevel','error','-f','concat','-safe','0','-i',str(manifest),'-fps_mode','vfr','-c:v','libx264','-pix_fmt','yuv420p','-movflags','+faststart',str(output)],capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0)
         if result.returncode:
             raise ValueError('Video encoding failed: '+result.stderr.decode(errors='replace')[-1000:])
         return output.read_bytes()

@@ -1360,12 +1360,16 @@ class ProcessingState:
         if kind == "reflectance" and not self.has_gold:
             raise ValueError("Reflectance was skipped; choose a raw-intensity stage.")
         start, end = int(payload.get("start", 0)), int(payload.get("end", 10**12))
+        stride = integer(payload.get("stride", 1), "Pattern stride")
+        if stride < 1:
+            raise ValueError("Pattern stride must be positive.")
         if start > end:
             raise ValueError("Start pattern must not exceed end pattern.")
         rows = self.qc[
             (self.qc.wavenumber == wn)
             & (self.qc.frame >= start)
             & (self.qc.frame <= end)
+            & ((self.qc.frame - start) % stride == 0)
         ]
         if payload.get("skip_invalid"):
             rows = rows[rows.frame_valid]
@@ -1385,14 +1389,18 @@ class ProcessingState:
             if a is not None:
                 arrays.append(a)
                 timestamp, source = starts.get(int(row.frame), (None, None))
-                previous = starts.get(int(row.frame) - 1)
-                dt = timestamp - previous[0] if timestamp is not None and previous else None
+                previous = frames[-1]["timestamp"] if frames else None
+                dt = timestamp - previous if timestamp is not None and previous is not None else None
+                if frames:
+                    frames[-1]["hold_slots"] = (int(row.frame) - frames[-1]["frame"]) // stride
                 frames.append(
                     {
                         "pattern": row.pattern,
                         "timestamp": timestamp,
                         "timestamp_source": source,
                         "dt_seconds": dt,
+                        "frame": int(row.frame),
+                        "hold_slots": 1,
                         "valid": bool(row.frame_valid),
                     }
                 )
@@ -1428,6 +1436,7 @@ class ProcessingState:
         else:
             extrema_label = "Data extrema: no finite values"
         self.last_video = {
+            "stride": stride,
             "cmap": payload.get("cmap", "inferno"),
             "colorbar_zero": payload.get("colorbar_zero") in (True, "true", "1"),
             "processing_basis": "reflectance" if self.has_gold else "raw_intensity",

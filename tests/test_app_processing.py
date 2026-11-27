@@ -991,18 +991,24 @@ def test_timelapse_dt_uses_pattern_starts_before_filters(acquisition):
     state.qc.loc[state.qc.pattern == 'pattern0', 'frame_valid'] = False
     filtered = state.timelapse({'wavenumber': 1658, 'start': 1, 'skip_invalid': True})
     assert len(filtered['frames']) == 1
-    assert filtered['frames'][0]['dt_seconds'] == 60.
+    assert filtered['frames'][0]['dt_seconds'] is None
     assert filtered['frames'][0]['elapsed_seconds'] == 0.
-    # Do not substitute the previous displayed pattern when p-1 is missing.
+    # A gap in frame indices extends the hold of the preceding displayed frame.
     state.dataset.loc[state.dataset.pattern == 'pattern1', 'frame'] = 3
     state.qc.loc[state.qc.pattern == 'pattern1', 'frame'] = 3
-    assert state.timelapse({'wavenumber': 1658})['frames'][1]['dt_seconds'] is None
-    # An unprocessed predecessor still supplies timing; a pause stays visible.
+    frames = state.timelapse({'wavenumber': 1658})['frames']
+    assert frames[1]['dt_seconds'] == 60.
+    assert [f['hold_slots'] for f in frames] == [3, 1]
+    assert len(state.timelapse({'wavenumber': 1658, 'stride': 2})['frames']) == 1
+    sampled = state.timelapse({'wavenumber': 1658, 'stride': 3})['frames']
+    assert [f['frame'] for f in sampled] == [0, 3]
+    assert [f['hold_slots'] for f in sampled] == [1, 1]
+    # An unprocessed predecessor does not affect the displayed interval.
     predecessor = state.dataset.iloc[0].copy()
     predecessor['pattern'], predecessor['frame'] = 'pattern2', 2
     predecessor['created_timestamp'] = 1020.
     state.dataset.loc[len(state.dataset)] = predecessor
-    assert state.timelapse({'wavenumber': 1658})['frames'][1]['dt_seconds'] == 40.
+    assert state.timelapse({'wavenumber': 1658})['frames'][1]['dt_seconds'] == 60.
 
 
 def test_signal_trends_use_committed_values_and_explicit_image_regions(acquisition):

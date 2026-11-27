@@ -503,12 +503,15 @@ dataset tab and are not restored from project ZIPs.
 
 Timelapse timestamps use the earliest available file timestamp across all
  discovered bands of each pattern, independent of the displayed wavenumber.
-Each frame's **dt** is its pattern start minus the start of the immediately
-preceding numbered pattern (pattern p−1), including patterns outside the video
-range or excluded by QC. Missing predecessor timestamps produce a dash; the
-first pattern also has no dt. **elapsed** is relative to the first displayed
-pattern start, preserving acquisition pauses. Both are displayed to the nearest
-second; playback FPS remains independent. File timestamp sources retain the
+**Pattern stride** selects every Nth pattern starting at the start index, before QC
+exclusion. Each frame's **dt** is the difference between its acquisition start
+and the previous displayed frame's start. The first frame and pairs missing
+timestamps show a dash. **elapsed** is relative to the first displayed frame.
+Both values are displayed to the nearest second. Automatic playback uses 4/N FPS.
+Enter a playback FPS to override it, or clear the field to return to automatic.
+In preview and MP4, a skipped sampling position extends the preceding frame's
+hold proportionally. The last frame holds for one playback interval.
+File timestamp sources retain the
 creation-time / modification-time fallback rules described above. Only metadata
 available in the current dataset can be used (reproduced ZIPs may contain a
 subset of the original bands and patterns).
