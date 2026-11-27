@@ -24,3 +24,5 @@
 .incubator-plot-heading span{color:#46515e}
 .incubator-plot svg{display:block;width:100%;min-width:560px;font:12px Arial,sans-serif}
 #incubator-plots>p{text-align:center}
+
+.incubator-plot svg{touch-action:pan-y;user-select:none;cursor:crosshair}

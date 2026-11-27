@@ -22,8 +22,11 @@ humidity, heater/humidifier/fan/servo states, their standby flags, and raw water
 level. Use the checkboxes to hide individual plots. All plots share elapsed time
 in hours. Statistics start/end controls select an inclusive interval for the
 continuous measurements' mean, population standard deviation, minimum and maximum;
-the green band highlights this interval while curves retain the full recording.
-**Download PNG** saves the currently visible plots and statistics as one white-background
+the green band highlights this interval. Set **Display start/end** and click
+**Apply display range** (or press Enter), or drag horizontally within any plot to
+zoom all plots to the same time interval. Y axes adapt to visible data; statistics
+keep their independent interval. **Reset to full recording** restores the full view.
+**Download PNG** saves the currently visible time range, plots and statistics as one white-background
 image at 1960 pixels wide, named after the imported log.
 Invalid rows are counted and skipped; repeated or decreasing elapsed times are
 rejected to avoid silently merging device restarts. Recordings remain local to the

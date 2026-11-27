@@ -23,3 +23,27 @@ test('statistics exclude warmup, include endpoints and use population SD',()=>{
   assert.equal(statistics(rows,'v',3,4),null);
   assert.equal(statistics(rows,'v',2,2).sd,0);
 });
+
+test('display ranges reject invalid or out-of-recording inputs',()=>{
+  const {displayRange}=QCLIncubator;
+  assert.deepEqual(displayRange('0.25','0.5',0,1),[.25,.5]);
+  for(const [start,end] of [['',1],[0,''],[.5,.4],[.5,.5],[-1,.5],[0,2],['NaN',1]])assert.throws(()=>displayRange(start,end,0,1));
+  assert.deepEqual(displayRange(1,1,1,1),[1,1]);
+});
+test('zoom boundaries interpolate continuous signals without including offscreen extrema',()=>{
+  const rows=[{time_s:0,v:100},{time_s:10,v:0},{time_s:20,v:10},{time_s:30,v:100}];
+  assert.deepEqual(QCLIncubator.windowPoints(rows,'v',12,18),[{time_s:12,value:2},{time_s:18,value:8}]);
+  assert.deepEqual(QCLIncubator.windowPoints(rows,'v',10,20),[{time_s:10,value:0},{time_s:20,value:10}]);
+});
+test('digital zoom retains entry state, short pulses and exact transition boundaries',()=>{
+  const rows=[{time_s:0,v:0},{time_s:10,v:1},{time_s:11,v:0},{time_s:20,v:1}];
+  assert.deepEqual(QCLIncubator.windowPoints(rows,'v',5,15,true),[
+    {time_s:5,value:0},{time_s:10,value:1},{time_s:11,value:0},{time_s:15,value:0}
+  ]);
+  assert.deepEqual(QCLIncubator.windowPoints(rows,'v',10.2,10.8,true),[{time_s:10.2,value:1},{time_s:10.8,value:1}]);
+  assert.equal(QCLIncubator.windowPoints(rows,'v',10,20,true).at(-1).value,1);
+});
+test('full-range hour conversion preserves a singleton recording',()=>{
+  const rows=[{time_s:123,v:37}];
+  assert.deepEqual(QCLIncubator.windowPoints(rows,'v',123+1e-12,123-1e-12),[{time_s:123,value:37}]);
+});

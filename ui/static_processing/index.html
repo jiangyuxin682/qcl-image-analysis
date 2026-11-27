@@ -14,8 +14,11 @@
 <p class="hint">View a recording independently of image processing. All available measurements are shown by default. Data stays in this browser tab and is not included in project exports.</p>
 <p id="incubator-status" role="status">No incubator recording imported.</p>
 <div id="incubator-controls" hidden><div id="incubator-fields" class="incubator-fields"></div>
+<div class="fields"><label>Display start · h<input id="incubator-display-start" type="number" min="0" step="any"></label><label>Display end · h<input id="incubator-display-end" type="number" min="0" step="any"></label></div>
+<div class="toolbar"><button id="incubator-display-apply" type="button" class="secondary">Apply display range</button><button id="incubator-display-reset" type="button" class="secondary">Reset to full recording</button></div>
+<p id="incubator-display-status" class="hint" role="status"></p><p class="hint">Enter times and apply, or drag horizontally inside any plot to zoom all plots together. Y axes adapt to the visible data. Statistics use their independent interval below. PNG downloads use the current display range.</p>
 <div class="fields"><label>Statistics start · h<input id="incubator-start" type="number" min="0" step="any"></label><label>Statistics end · h<input id="incubator-end" type="number" min="0" step="any"></label></div>
-<p id="incubator-range-status" class="hint" role="status"></p><p class="hint">The pale green band marks the statistics interval. Curves always show the full recording. Water level is shown in raw sensor units; standby flags are plotted as recorded (1 = ON).</p>
+<p id="incubator-range-status" class="hint" role="status"></p><p class="hint">The pale green band marks the statistics interval. Water level is shown in raw sensor units; standby flags are plotted as recorded (1 = ON).</p>
 <button id="incubator-download" type="button" class="secondary" disabled>Download PNG</button><span id="incubator-export-status" class="hint" role="status"></span>
 <div id="incubator-plots"></div></div></div>
 <div id="discovery-summary" class="card" hidden><h3>Discovered data</h3><div id="discovered-bands" class="chips"></div><p id="discovery-count"></p><button id="assign-spectrum-bands" class="primary">Assign centers and baseline bands</button></div>
