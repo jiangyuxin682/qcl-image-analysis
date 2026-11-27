@@ -13,6 +13,22 @@ The app opens at http://127.0.0.1:8766; append `--port 8776` if needed.
 Keep the server running and export before exit. The separate `ui/app.py`
 is the legacy interface.
 
+## Incubator recordings in Section 1
+
+Use **Import incubator data** to select a TXT log containing a `time_s` CSV
+header and numeric rows, optionally prefixed with `[YYYY-MM-DD HH:MM:SS]`.
+All available measurements are plotted by default: air and medium temperature,
+humidity, heater/humidifier/fan/servo states, their standby flags, and raw water
+level. Use the checkboxes to hide individual plots. All plots share elapsed time
+in hours. Statistics start/end controls select an inclusive interval for the
+continuous measurements' mean, population standard deviation, minimum and maximum;
+the green band highlights this interval while curves retain the full recording.
+**Download PNG** saves the currently visible plots and statistics as one white-background
+image at 1960 pixels wide, named after the imported log.
+Invalid rows are counted and skipped; repeated or decreasing elapsed times are
+rejected to avoid silently merging device restarts. Recordings remain local to the
+browser tab, are independent of image processing, and are not saved in project ZIPs.
+
 ## How the workflow works
 
 1. Use the file chooser to select a stacks directory, a pattern directory, an

@@ -1723,6 +1723,7 @@ class Handler(BaseHTTPRequestHandler):
             "/pixel_axes.js": ("pixel_axes.js", "text/javascript; charset=utf-8"),
             "/image_tools.js": ("image_tools.js", "text/javascript; charset=utf-8"),
             "/project_options.js": ("project_options.js", "text/javascript; charset=utf-8"),
+            "/incubator.js": ("incubator.js", "text/javascript; charset=utf-8"),
             "/uploads.js": ("uploads.js", "text/javascript; charset=utf-8"),
         }
         try:

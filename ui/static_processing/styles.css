@@ -16,3 +16,11 @@
 .file-picker-button:hover,input[type="file"]::file-selector-button:hover{background:#e5e5e5}
 .file-picker-button:focus-visible{outline:2px solid #76bba9;outline-offset:2px}
 .file-picker-status{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* Incubator recordings share one elapsed-time scale across every subplot. */
+.incubator-fields{display:flex;flex-wrap:wrap;gap:10px 22px;margin:16px 0}
+.incubator-plot{margin:16px 0 0;overflow-x:auto}
+.incubator-plot-heading{display:flex;flex-wrap:wrap;gap:8px 22px;font-size:13px}
+.incubator-plot-heading span{color:#46515e}
+.incubator-plot svg{display:block;width:100%;min-width:560px;font:12px Arial,sans-serif}
+#incubator-plots>p{text-align:center}
